@@ -374,6 +374,18 @@ impl Schema {
             && self.authority_tags.is_subset(&other.authority_tags)
     }
 
+    /// Returns the admitted node types in canonical order.
+    #[must_use]
+    pub fn node_types(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.node_types.iter().map(AsRef::as_ref)
+    }
+
+    /// Returns the admitted object types in canonical order.
+    #[must_use]
+    pub fn object_types(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.object_types.iter().map(AsRef::as_ref)
+    }
+
     /// Returns the admitted authority tags.
     #[must_use]
     pub fn authority_tags(&self) -> impl ExactSizeIterator<Item = &AuthorityTag> {

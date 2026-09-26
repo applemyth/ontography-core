@@ -1100,6 +1100,28 @@ impl Application {
         self
     }
 
+    /// Reconstructs this application's binding with an extended vocabulary.
+    ///
+    /// Existing contracts must share their validators with this application;
+    /// graph structure, annotations, authority rules, and root rules must stay
+    /// identical. Retained executables and the configured grammar are preserved.
+    /// This changes construction/resumption configuration, not any live session.
+    /// Use [`SessionHandle::extend`] to extend a running session, persist the
+    /// additions in the caller, and reconstruct this binding before resuming it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an extension rejection if `next` is not a strict vocabulary
+    /// extension of this application's admitted starting definition.
+    pub fn with_vocabulary_extension(
+        mut self,
+        next: Arc<Kernel>,
+    ) -> Result<Self, crate::ExtensionError> {
+        self.kernel.evaluate_extension(&next)?;
+        self.kernel = next;
+        Ok(self)
+    }
+
     /// Returns the admitted starting graph for new application runs.
     #[must_use]
     pub fn kernel(&self) -> &Kernel {
