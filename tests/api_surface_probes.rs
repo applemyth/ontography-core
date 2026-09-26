@@ -9,7 +9,7 @@ use ontography::{
     ContextError, Contract, DefinitionId, ExecutionFailure, ExecutionStatus, Graph,
     InvocationTrigger, Kernel, Node, NodeComponent, NodeConfig, NodeDefinition, Payload,
     ProposalDecision, ProposalRuntime, RewriteError, RewriteFragment, RewriteGrammar, RewriteMatch,
-    RewriteProduction, RewriteRequest, RootRule, Schema, SessionTransitionError, Trigger,
+    RewriteProduction, RewriteRequest, RootRule, Schema, Trigger,
 };
 
 fn payload(value: &'static [u8]) -> Payload {
@@ -173,12 +173,10 @@ async fn direct_rewrite_grammar_is_caller_supplied_but_runtime_grammar_is_sealed
     let session = unconfigured.open().unwrap();
     assert!(matches!(
         session.prepare_rewrite(&request).await,
-        Err(SessionTransitionError::Rewrite(
-            RewriteError::UnknownProduction(_)
-        ))
+        Ok(Err(RewriteError::UnknownProduction(_)))
     ));
 
     let configured = ProposalRuntime::with_grammar(kernel, grammar);
     let session = configured.open().unwrap();
-    assert!(session.prepare_rewrite(&request).await.is_ok());
+    assert!(session.prepare_rewrite(&request).await.unwrap().is_ok());
 }

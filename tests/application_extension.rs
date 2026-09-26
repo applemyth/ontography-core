@@ -83,7 +83,11 @@ async fn extended_application_resumes_bindings_and_grammar_without_replaying_inp
         *run.snapshot().await.kernel().fingerprint(),
         base_fingerprint
     );
-    run.session().extend(extended.clone()).await.unwrap();
+    run.session()
+        .extend(extended.clone())
+        .await
+        .unwrap()
+        .unwrap();
     let path = run.suspend().await.unwrap();
     let resumed = rebuilt.resume(path).await.unwrap();
     resumed.wait_idle().await;
@@ -101,8 +105,18 @@ async fn extended_application_resumes_bindings_and_grammar_without_replaying_inp
             BTreeMap::new(),
         ),
     );
-    let plan = resumed.session().prepare_rewrite(&request).await.unwrap();
-    resumed.session().commit_rewrite(plan).await.unwrap();
+    let plan = resumed
+        .session()
+        .prepare_rewrite(&request)
+        .await
+        .unwrap()
+        .unwrap();
+    resumed
+        .session()
+        .commit_rewrite(plan)
+        .await
+        .unwrap()
+        .unwrap();
     {
         let observed = launches.lock().unwrap();
         assert_eq!(observed.len(), 2);

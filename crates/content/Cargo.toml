@@ -1,0 +1,25 @@
+[package]
+name = "ontography-content"
+description = "Content-addressed storage and immutable content packages for Ontography"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+ontography-calculus.workspace = true
+bao-tree.workspace = true
+bytes.workspace = true
+futures-lite.workspace = true
+iroh-blobs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

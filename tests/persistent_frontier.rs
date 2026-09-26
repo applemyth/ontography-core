@@ -9,7 +9,7 @@ use ontography::{
     EdgeDefinition, Emission, ExtensionError, Graph, IngressMode, Kernel, Node, NodeDefinition,
     OutputAuthority, PackageId, Phase, ProposalDecision, ProposalRuntime, Reject, RetireError,
     RetirementReason, RewriteError, RewriteFragment, RewriteGrammar, RewriteMatch,
-    RewriteProduction, RewriteRequest, RootRule, Schema, SessionHandle, SessionTransitionError,
+    RewriteProduction, RewriteRequest, RootRule, Schema, SessionHandle,
 };
 
 fn bytes(value: &'static [u8]) -> Arc<[u8]> {
@@ -151,35 +151,53 @@ async fn retirements_and_extension_survive_reopen() {
 
     // A receipt on e1 at the All receiver, then e1 is replaced: RouteRemoved.
     let stranded = emit(&session, outbound()).await;
-    session.transfer(stranded, "e1").await.unwrap();
-    let plan = session.prepare_rewrite(&replace).await.unwrap();
+    session.transfer(stranded, "e1").await.unwrap().unwrap();
+    let plan = session.prepare_rewrite(&replace).await.unwrap().unwrap();
     assert_eq!(
         plan.retirements().get(&stranded),
         Some(&RetirementReason::RouteRemoved)
     );
-    let outcome = session.commit_rewrite(plan).await.unwrap();
+    let outcome = session.commit_rewrite(plan).await.unwrap().unwrap();
     assert_eq!(outcome.revision(), 3);
     assert!(session.pending_at("b").await.unwrap().packages().is_empty());
 
     // An outbound package retired explicitly with evidence.
     let unrouted = emit(&session, outbound()).await;
     let evidence = root(&session, None).await;
-    let retirement = session.retire(unrouted, Some(evidence)).await.unwrap();
+    let retirement = session
+        .retire(unrouted, Some(evidence))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(retirement.reason(), RetirementReason::Explicit);
-    assert_eq!(retirement.holder(), "a");
-    assert_eq!(retirement.phase(), Phase::Out);
+    let record = session
+        .snapshot()
+        .await
+        .state()
+        .package(unrouted)
+        .cloned()
+        .unwrap();
+    assert_eq!(record.holder(), "a");
+    assert_eq!(record.phase(), Phase::Out);
     assert_eq!(retirement.revision(), 6);
     assert_eq!(retirement.evidence(), Some(evidence));
-    assert!(session.outbound().await.unwrap().packages().is_empty());
+    assert!(
+        session
+            .outbound_page(None, None, usize::MAX)
+            .await
+            .unwrap()
+            .packages()
+            .is_empty()
+    );
     assert!(matches!(
         session.retire(unrouted, None).await,
-        Err(SessionTransitionError::Retire(RetireError::NotLive(id))) if id == unrouted
+        Ok(Err(RetireError::NotLive(id))) if id == unrouted
     ));
     assert!(matches!(
         session
             .retire(stranded, Some(ActivationId::from_u128(5)))
             .await,
-        Err(SessionTransitionError::Retire(RetireError::NotLive(_)))
+        Ok(Err(RetireError::NotLive(_)))
     ));
 
     // A received package retired explicitly must leave the readiness index.
@@ -188,9 +206,16 @@ async fn retirements_and_extension_survive_reopen() {
         session.next_trigger_at("b").await.unwrap().packages().len(),
         1
     );
-    let retirement = session.retire(received, None).await.unwrap();
-    assert_eq!(retirement.phase(), Phase::In);
-    assert_eq!(retirement.holder(), "b");
+    let retirement = session.retire(received, None).await.unwrap().unwrap();
+    let record = session
+        .snapshot()
+        .await
+        .state()
+        .package(received)
+        .cloned()
+        .unwrap();
+    assert_eq!(record.phase(), Phase::In);
+    assert_eq!(record.holder(), "b");
     assert_eq!(retirement.revision(), 8);
     assert!(
         session
@@ -206,11 +231,17 @@ async fn retirements_and_extension_survive_reopen() {
     let live = emit(&session, outbound()).await;
     assert!(matches!(
         session.retire(live, Some(ActivationId::from_u128(5))).await,
-        Err(SessionTransitionError::Retire(
-            RetireError::UnknownEvidence(_)
-        ))
+        Ok(Err(RetireError::UnknownEvidence(_)))
     ));
-    assert_eq!(session.retire(live, None).await.unwrap().revision(), 10);
+    assert_eq!(
+        session
+            .retire(live, None)
+            .await
+            .unwrap()
+            .unwrap()
+            .revision(),
+        10
+    );
 
     // A consumed package is not live.
     let consumed = emit(&session, delivered("e2")).await;
@@ -223,19 +254,23 @@ async fn retirements_and_extension_survive_reopen() {
     ));
     assert!(matches!(
         session.retire(consumed, None).await,
-        Err(SessionTransitionError::Retire(RetireError::NotLive(id))) if id == consumed
+        Ok(Err(RetireError::NotLive(id))) if id == consumed
     ));
 
     // The extension must keep the current graph; the pre-rewrite graph is rejected.
     assert!(matches!(
         session.extend(Arc::clone(&with_e1)).await,
-        Err(SessionTransitionError::Extension(ExtensionError::Structure))
+        Ok(Err(ExtensionError::Structure))
     ));
     assert!(matches!(
         session.prepare_rewrite(&tagged).await,
-        Err(SessionTransitionError::Rewrite(RewriteError::Definition(_)))
+        Ok(Err(RewriteError::Definition(_)))
     ));
-    let revision = session.extend(Arc::clone(&extended)).await.unwrap();
+    let revision = session
+        .extend(Arc::clone(&extended))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(revision, 13);
     let snapshot = session.snapshot().await;
     assert_eq!(snapshot.revision(), 13);
@@ -264,17 +299,18 @@ async fn retirements_and_extension_survive_reopen() {
     assert_eq!(reopened.revision(), 13);
 
     // The new tag is now usable by a rewrite.
-    let plan = session.prepare_rewrite(&tagged).await.unwrap();
+    let plan = session.prepare_rewrite(&tagged).await.unwrap().unwrap();
     assert!(plan.retirements().is_empty());
-    let outcome = session.commit_rewrite(plan).await.unwrap();
+    let outcome = session.commit_rewrite(plan).await.unwrap().unwrap();
     assert_eq!(outcome.revision(), 14);
     let installed = session.snapshot().await;
     assert!(installed.kernel().graph().edge("e3").is_some());
     assert!(
         installed
             .kernel()
-            .edge_authority_tags("e3")
+            .edge_definition("e3")
             .unwrap()
+            .authority_tags()
             .contains(&tag("extra"))
     );
     // The root still carries only `route`, so e3 refuses its packages while e2 accepts them.

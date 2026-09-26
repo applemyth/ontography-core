@@ -875,10 +875,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
 dependencies = [
  "cfg-if",
- "js-sys",
  "libc",
  "wasi",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -2047,7 +2045,6 @@ dependencies = [
  "lru-slab",
  "rand",
  "rand_pcg",
- "ring",
  "rustc-hash",
  "rustls",
  "rustls-pki-types",
@@ -2215,20 +2212,87 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
-name = "ontography-core"
+name = "ontography-application"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "ontography-calculus",
+ "ontography-content",
+ "ontography-runtime",
+ "ontography-workspace",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "ontography-calculus"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+ "uuid",
+]
+
+[[package]]
+name = "ontography-content"
 version = "0.1.0"
 dependencies = [
  "bao-tree",
  "bytes",
  "futures-lite",
- "iroh",
  "iroh-blobs",
- "reflink-copy",
- "rusqlite",
+ "ontography-calculus",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "thiserror 2.0.19",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "ontography-core"
+version = "0.1.0"
+dependencies = [
+ "ontography-application",
+ "ontography-calculus",
+ "ontography-content",
+ "ontography-runtime",
+ "ontography-workspace",
+ "rusqlite",
+ "serde_json",
  "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "ontography-runtime"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "iroh-blobs",
+ "ontography-calculus",
+ "ontography-content",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "ontography-workspace"
+version = "0.1.0"
+dependencies = [
+ "ontography-content",
+ "reflink-copy",
  "thiserror 2.0.19",
  "tokio",
  "uuid",
@@ -2702,7 +2766,6 @@ checksum = "6725596c3f2c3a0aef021139e145d4eafe314a6623e4680ca83852b2c67ab2ba"
 dependencies = [
  "log",
  "once_cell",
- "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",
@@ -3401,7 +3464,6 @@ dependencies = [
  "http",
  "httparse",
  "rand",
- "ring",
  "rustls-pki-types",
  "sha1_smol",
  "simdutf8",

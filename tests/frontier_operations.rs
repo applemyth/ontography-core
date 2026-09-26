@@ -197,14 +197,14 @@ type Projected = Vec<(u128, RetirementReason, String, Phase, Option<ActivationId
 
 fn projected(state: &State) -> Projected {
     state
-        .retirements()
-        .iter()
-        .map(|(id, r)| {
+        .retired()
+        .map(|(id, record)| {
+            let r = record.retirement().expect("retired record");
             (
                 id.output(),
                 r.reason(),
-                r.holder().to_owned(),
-                r.phase(),
+                record.holder().to_owned(),
+                record.phase(),
                 r.evidence(),
             )
         })
@@ -229,8 +229,8 @@ fn explicit_retirement_is_a_recorded_frontier_mutation() {
 
     let retirement = kernel.retire(&mut state, received, Some(evidence)).unwrap();
     assert_eq!(retirement.reason(), RetirementReason::Explicit);
-    assert_eq!(retirement.holder(), "b");
-    assert_eq!(retirement.phase(), Phase::In);
+    assert_eq!(state.package(received).unwrap().holder(), "b");
+    assert_eq!(state.package(received).unwrap().phase(), Phase::In);
     assert_eq!(retirement.revision(), 4);
     assert_eq!(retirement.evidence(), Some(evidence));
     assert_eq!(state.retirement(received), Some(&retirement));
@@ -265,8 +265,8 @@ fn explicit_retirement_is_a_recorded_frontier_mutation() {
     assert_eq!(state, before);
 
     let retirement = kernel.retire(&mut state, unrouted, None).unwrap();
-    assert_eq!(retirement.phase(), Phase::Out);
-    assert_eq!(retirement.holder(), "a");
+    assert_eq!(state.package(unrouted).unwrap().phase(), Phase::Out);
+    assert_eq!(state.package(unrouted).unwrap().holder(), "a");
     assert_eq!(retirement.evidence(), None);
     assert_eq!(retirement.revision(), 5);
     assert!(state.is_quiescent());
@@ -433,7 +433,7 @@ fn disjoint_rewrites_commute_on_the_frontier() {
         }
         (
             *kernel.fingerprint(),
-            state.position(package).cloned(),
+            state.position(package),
             projected(&state),
             state,
         )
@@ -519,7 +519,7 @@ fn vocabulary_extension_admits_only_monotone_additions() {
     let prepared = base
         .prepare_extension(&state, Arc::clone(&extended))
         .unwrap();
-    assert_eq!(prepared.base_revision(), 1);
+    assert_eq!(prepared.transition().base().revision(), 1);
     assert!(Arc::ptr_eq(prepared.next_kernel(), &extended));
     let current = base.commit_extension(&mut state, prepared).unwrap();
     assert_eq!(current.fingerprint(), extended.fingerprint());

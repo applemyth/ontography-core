@@ -4,44 +4,59 @@
 //! activations, transfers, explicit retirements, interface-preserving graph
 //! rewrites with local frontier cleanup, and monotone vocabulary extensions.
 //! Runtime sessions persist and serialize these actions together.
+//!
+//! This crate is the facade over the workspace crates: `ontography-calculus`,
+//! `ontography-content`, `ontography-runtime`, `ontography-workspace`, and
+//! `ontography-application`. It re-exports one flat set of names from them,
+//! plus the calculus crate's [`storage`] module, which names the adapter
+//! contract a persistent store implements.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-pub mod application;
-mod config;
-pub mod content;
-pub mod context;
-mod graph;
-mod kernel;
-pub mod package;
-pub mod project;
-pub mod runtime;
-pub mod workspace;
+pub use ontography_application::application;
+pub use ontography_application::project;
+pub use ontography_calculus::storage;
+pub use ontography_content::content;
+pub use ontography_content::package;
+pub use ontography_runtime::context;
+pub use ontography_workspace as workspace;
+
+/// Canonical proposal sessions and opaque execution hosting.
+pub mod runtime {
+    pub use ontography_runtime::{
+        ActivityReporter, ActivitySnapshot, ExecutableDefinition, ExecutionContext,
+        ExecutionFailure, ExecutionFuture, ExecutionHandle, ExecutionHost, ExecutionId,
+        ExecutionSignal, ExecutionStatus, ExecutionStop, FrontierCounts, FrontierOverview,
+        FrontierReceiver, InvocationActivity, InvocationGuard, LaunchError, PackageHistory,
+        PendingFrontier, ProposalDecision, ProposalRuntime, RewriteOutcome, SessionError,
+        SessionHandle, SessionOpenError, SessionRewrite, SessionSnapshot, SessionStatus,
+        SessionTransitionError, SubmitError,
+    };
+}
 
 pub use application::{
     Application, ApplicationBuilder, ApplicationContext, ApplicationError, ApplicationRunMode,
-    ApplicationStartError, EdgeComponent, EdgeConfig, NodeComponent, NodeConfig,
-    RunningApplication,
+    ApplicationStartError, EdgeConfig, NodeComponent, NodeConfig, RunningApplication,
 };
-pub use config::{ApplicationConfig, ApplicationConfigError, ApplicationRegistry};
 pub use content::{ContentError, ContentId, ContentMetadata, ContentReader, ContentStore};
 pub use context::{
     ContextContribution, ContextError, ContextEvent, ContextMode, ContextPolicy, ContextResponse,
     InitialContext, InvocationHandle, InvocationId, InvocationRecord, InvocationStatus,
     InvocationTrigger, PackageGrant, PackageMemberGrant, ReceiptState, WorkspacePolicy,
 };
-pub use graph::{
-    Authority, AuthorityMatch, AuthorityTag, AuthorityTransitionRule, ContentDigest, Contract,
-    ContractViolation, DefinitionError, DefinitionFingerprint, DefinitionId, Edge, EdgeDefinition,
-    Graph, IngressMode, Node, NodeDefinition, Payload, RootRule, Schema,
-};
-pub use kernel::{
-    Activation, ActivationId, ActivationProposal, Delivery, EdgeUse, Emission, ExtensionError,
-    Kernel, Output, OutputAuthority, Package, PackageId, Phase, Position, PreparedExtension,
-    PreparedRewrite, PreparedTransfer, Reject, RetireError, Retirement, RetirementReason,
-    RewriteError, RewriteFragment, RewriteGrammar, RewriteMatch, RewriteProduction, RewriteRequest,
-    State, StateParts, StateRestoreError, TransferError, Trigger, TriggerWitness,
+pub use ontography_application::{ApplicationConfig, ApplicationConfigError, ApplicationRegistry};
+pub use ontography_calculus::{
+    Activation, ActivationId, ActivationProposal, ApplyError, Authority, AuthorityMatch,
+    AuthorityTag, AuthorityTransitionRule, Binding, Checkpoint, CheckpointError, ContentDigest,
+    Contract, ContractViolation, DefinitionError, DefinitionFingerprint, DefinitionId, Delivery,
+    Edge, EdgeDefinition, Emission, ExtensionError, FRAGMENT_ENCODING_VERSION, FragmentData,
+    FragmentDecodeError, FrontierView, Graph, IngressMode, Kernel, Node, NodeDefinition, Output,
+    OutputAuthority, PackageId, PackageRecord, PackageStatus, PackageView, Payload, Phase,
+    Position, PreparedExtension, PreparedRewrite, PreparedTransfer, Reject, RetireError,
+    Retirement, RetirementReason, RewriteError, RewriteFragment, RewriteGrammar, RewriteMatch,
+    RewriteProduction, RewriteRequest, RootRule, Schema, State, StateParts, StateRestoreError,
+    TransferError, Transition, TransitionKind, Trigger, TriggerWitness,
 };
 pub use package::{
     PackageDocument, PackageEnvelope, PackageError, PackageLimits, PackageStore, ResolvedEntry,

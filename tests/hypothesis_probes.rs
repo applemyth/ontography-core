@@ -145,8 +145,8 @@ fn changing_the_holders_outgoing_edges_rechecks_outbound_work() {
     assert!(state.position(package).is_none());
     let retirement = state.retirement(package).unwrap();
     assert_eq!(retirement.reason(), RetirementReason::NoAcceptingEdge);
-    assert_eq!(retirement.holder(), "a");
-    assert_eq!(retirement.phase(), Phase::Out);
+    assert_eq!(state.package(package).unwrap().holder(), "a");
+    assert_eq!(state.package(package).unwrap().phase(), Phase::Out);
     assert_eq!(retirement.revision(), 2);
     assert_eq!(retirement.evidence(), None);
 }
@@ -176,8 +176,8 @@ fn replacing_an_all_join_edge_retires_the_stranded_receipt() {
     assert!(state.is_quiescent());
     let retirement = state.retirement(package).unwrap();
     assert_eq!(retirement.reason(), RetirementReason::RouteRemoved);
-    assert_eq!(retirement.holder(), "b");
-    assert_eq!(retirement.phase(), Phase::In);
+    assert_eq!(state.package(package).unwrap().holder(), "b");
+    assert_eq!(state.package(package).unwrap().phase(), Phase::In);
     assert_eq!(retirement.revision(), 3);
     assert_eq!(state.deliveries().get(&package).unwrap().edge_id(), "e1");
 

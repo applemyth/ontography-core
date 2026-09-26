@@ -1,0 +1,19 @@
+[package]
+name = "ontography-workspace"
+description = "Writable filesystem views of immutable Ontography content packages"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+ontography-content.workspace = true
+reflink-copy.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true
