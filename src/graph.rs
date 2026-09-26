@@ -368,6 +368,12 @@ impl Schema {
         authority.tags.is_subset(&self.authority_tags)
     }
 
+    pub(crate) fn is_subset_of(&self, other: &Self) -> bool {
+        self.node_types.is_subset(&other.node_types)
+            && self.object_types.is_subset(&other.object_types)
+            && self.authority_tags.is_subset(&other.authority_tags)
+    }
+
     /// Returns the admitted authority tags.
     #[must_use]
     pub fn authority_tags(&self) -> impl ExactSizeIterator<Item = &AuthorityTag> {

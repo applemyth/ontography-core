@@ -23,3 +23,16 @@ publication remains disabled; local path and Git dependencies are supported.
 
 Run the retained tests with `cargo test`. The orphan retention probe is ignored
 because it documents a known failure; see [CORE_QA_RESEARCH.md](CORE_QA_RESEARCH.md).
+
+## Retirement, locality, and extension
+
+Every package is exactly one of live, consumed, or retired. A retirement is a
+canonical record with reason, holder, phase, revision, and optional evidence;
+`Kernel::retire` and `SessionHandle::retire` retire one live package explicitly.
+Rewrite cleanup is local: an `Out` package is rechecked only when its holder's
+outgoing edge set changed, and an `In` receipt at an `All` receiver is retired
+as `RouteRemoved` when its delivery edge leaves the incoming set, so rewrites
+with disjoint footprints commute. `Kernel::prepare_extension` and
+`SessionHandle::extend` add schema vocabulary and contracts without touching
+the graph or frontier. Persistent stores are schema version 9; older stores are
+refused on open, not migrated.

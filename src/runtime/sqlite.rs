@@ -1,8 +1,9 @@
 //! Durable SQLite-backed logical state ownership.
 //!
 //! A non-null package phase records live frontier membership. Clearing it retires
-//! a package without changing its output or delivery facts; consumption additionally
-//! records a consumer. The stored holder remains available for historical views.
+//! a package; the `package_retirements` row records why, without changing output
+//! or delivery facts. Consumption additionally records a consumer. The stored
+//! holder remains available for historical views.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -18,19 +19,20 @@ use super::object_store::{ObjectStore, ObjectStoreError};
 use super::session::{FrontierCounts, PackageHistory, SessionStatus};
 use crate::content::ContentId;
 use crate::kernel::{
-    AdmissionDelta, AdmissionView, Checkpoint, PackageObservation, PendingInput,
+    AdmissionDelta, AdmissionView, Checkpoint, PackageObservation, PendingInput, RetireObservation,
     TransferObservation,
 };
 use crate::{
     Activation, ActivationId, ActivationProposal, Authority, AuthorityTag, ContentDigest,
-    DefinitionFingerprint, DefinitionId, Delivery, IngressMode, Kernel, Output, Package, PackageId,
-    Payload, Phase, Position, PreparedRewrite, Reject, RetirementReason, RewriteError,
-    RewriteFragment, RewriteGrammar, RewriteRequest, State, TransferError, Trigger,
+    DefinitionFingerprint, DefinitionId, Delivery, ExtensionError, IngressMode, Kernel, Output,
+    Package, PackageId, Payload, Phase, Position, PreparedRewrite, Reject, RetireError, Retirement,
+    RetirementReason, RewriteError, RewriteFragment, RewriteGrammar, RewriteRequest, State,
+    TransferError, Trigger,
 };
 
 pub(crate) mod context;
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 // Artifact references supplement activation facts without changing the kernel's
 // exact-byte payload predicates.
@@ -139,6 +141,11 @@ pub(super) struct SqliteTransferCommit {
     pub(super) revision: u64,
 }
 
+pub(super) struct SqliteRetireCommit {
+    pub(super) retirement: Retirement,
+    pub(super) revision: u64,
+}
+
 enum SqlitePackageFact {
     Pending {
         edge_id: Arc<str>,
@@ -154,7 +161,7 @@ struct SqliteAdmissionView {
     packages: BTreeMap<PackageId, SqlitePackageFact>,
 }
 
-struct SqliteTransferFact {
+struct SqliteCustodyFact {
     package: Package,
     position: Option<Position>,
     consumed: bool,
@@ -276,6 +283,9 @@ impl SqliteSession {
                 )?;
             }
         }
+        for (package_id, retirement) in state.retirements() {
+            insert_retirement(&transaction, *package_id, retirement)?;
+        }
         write_current_definition(&transaction, kernel, state)?;
         rebuild_readiness(&transaction, kernel)?;
         transaction.commit()?;
@@ -308,7 +318,7 @@ impl SqliteSession {
         validate_definition_binding(&opened.session.connection, kernel)?;
         let state = opened.session.snapshot(&opened.current_kernel, objects)?;
         let parts = state.to_parts().map_err(|_| SqliteStateError::invalid(
-            "historical reachability verification is unavailable after rewrites or explicit transfers"))?;
+            "historical reachability verification is unavailable after rewrites, transfers, retirements, or extensions"))?;
         let evidence = state
             .packages()
             .values()
@@ -802,6 +812,31 @@ impl SqliteSession {
                 },
             );
         }
+        let mut retirements = BTreeMap::new();
+        let mut statement = self.connection.prepare(
+            "SELECT producer_activation, output_id, reason, holder_node, phase, revision, evidence_activation
+             FROM package_retirements ORDER BY producer_activation, output_id",
+        )?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let id = PackageId::from_parts(
+                decode_activation(row.get(0)?)?,
+                decode_u128(row.get(1)?, "retired output ID")?,
+            );
+            retirements.insert(
+                id,
+                Retirement {
+                    reason: decode_reason(row.get(2)?)?,
+                    holder: Arc::from(row.get::<_, String>(3)?),
+                    phase: decode_phase(row.get(4)?)?,
+                    revision: decode_u64(row.get(5)?, "retirement revision")?,
+                    evidence: row
+                        .get::<_, Option<Vec<u8>>>(6)?
+                        .map(decode_activation)
+                        .transpose()?,
+                },
+            );
+        }
         let activations = records
             .into_iter()
             .map(|(id, (trigger, result, outputs))| (id, Activation::new(trigger, result, outputs)))
@@ -812,6 +847,7 @@ impl SqliteSession {
                 packages,
                 positions,
                 deliveries,
+                retirements,
                 revision: decode_u64(revision, "state revision")?,
                 used_node_ids: decode_ids(&used_nodes)?,
                 used_edge_ids: decode_ids(&used_edges)?,
@@ -849,28 +885,19 @@ impl SqliteSession {
             return Ok(None);
         }
         validate_definition_binding(&transaction, kernel)?;
-        let retired = plan
-            .prepared
-            .retirements()
-            .keys()
-            .copied()
-            .collect::<Vec<_>>();
         // The session owner and SQL revision bind the exact predecessor; the
         // admitted plan already owns the state from which its successor follows.
         let (next, current_kernel) = plan
             .prepared
             .into_successor()
             .map_err(|error| SqliteStateError::invalid(error.to_string()))?;
-        for package_id in retired {
-            let producer = activation_blob(package_id.producer());
-            let output = u128_blob(package_id.output());
-            let changed = transaction.execute(
-                "UPDATE package_outputs SET phase = NULL WHERE producer_activation = ?1 AND output_id = ?2 AND phase IS NOT NULL",
-                params![producer.as_slice(), output.as_slice()],
-            )?;
-            if changed != 1 {
-                return Err(SqliteStateError::invalid("retired package is not live"));
-            }
+        let retired = next
+            .retirements()
+            .iter()
+            .filter(|(_, retirement)| retirement.revision() == next.revision());
+        for (package_id, retirement) in retired {
+            clear_phase(&transaction, *package_id)?;
+            insert_retirement(&transaction, *package_id, retirement)?;
         }
         write_current_definition(&transaction, &current_kernel, &next)?;
         rebuild_readiness(&transaction, &current_kernel)?;
@@ -894,7 +921,7 @@ impl SqliteSession {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         validate_definition_binding(&transaction, kernel)?;
-        let fact = read_transfer_fact(&transaction, package_id)?;
+        let fact = read_custody_fact(&transaction, package_id)?;
         let observation = TransferObservation {
             package: fact.as_ref().map(|fact| &fact.package),
             position: fact.as_ref().and_then(|fact| fact.position.as_ref()),
@@ -951,6 +978,81 @@ impl SqliteSession {
         let revision = advance_revision(&transaction)?;
         transaction.commit()?;
         Ok(Ok(SqliteTransferCommit { delivery, revision }))
+    }
+
+    pub(super) fn retire(
+        &mut self,
+        kernel: &Kernel,
+        package_id: PackageId,
+        evidence: Option<ActivationId>,
+    ) -> Result<Result<SqliteRetireCommit, RetireError>, SqliteStateError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        validate_definition_binding(&transaction, kernel)?;
+        let fact = read_custody_fact(&transaction, package_id)?;
+        let evidence_known = match evidence {
+            None => true,
+            Some(id) => transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM activations WHERE activation_id = ?1)",
+                [activation_blob(id).as_slice()],
+                |row| row.get::<_, bool>(0),
+            )?,
+        };
+        let observation = RetireObservation {
+            position: fact.as_ref().and_then(|fact| fact.position.as_ref()),
+            consumed: fact.as_ref().is_some_and(|fact| fact.consumed),
+            evidence_known,
+        };
+        let (holder, phase) = match kernel.evaluate_retire(package_id, evidence, observation) {
+            Ok(proof) => proof,
+            Err(RetireError::Admission(RewriteError::InvalidState(message))) => {
+                return Err(SqliteStateError::invalid(message));
+            }
+            Err(error) => return Ok(Err(error)),
+        };
+        clear_phase(&transaction, package_id)?;
+        let revision = advance_revision(&transaction)?;
+        let retirement = Retirement {
+            reason: RetirementReason::Explicit,
+            holder,
+            phase,
+            revision,
+            evidence,
+        };
+        insert_retirement(&transaction, package_id, &retirement)?;
+        if phase == Phase::In {
+            rebuild_readiness(&transaction, kernel)?;
+        }
+        transaction.commit()?;
+        Ok(Ok(SqliteRetireCommit {
+            retirement,
+            revision,
+        }))
+    }
+
+    pub(super) fn extend(
+        &mut self,
+        kernel: &Kernel,
+        next: &Kernel,
+    ) -> Result<Result<u64, ExtensionError>, SqliteStateError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        validate_definition_binding(&transaction, kernel)?;
+        if let Err(error) = kernel.evaluate_extension(next) {
+            return Ok(Err(error));
+        }
+        let revision = advance_revision(&transaction)?;
+        transaction.execute(
+            "UPDATE session_meta SET definition_fingerprint = ?1, current_graph = ?2 WHERE singleton = 1",
+            params![
+                next.fingerprint().as_bytes().as_slice(),
+                encode_json(&RewriteFragment::from_kernel(next))?
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(Ok(revision))
     }
 
     fn validate_trigger_projection(&self, kernel: &Kernel) -> Result<(), SqliteStateError> {
@@ -1064,6 +1166,68 @@ fn decode_phase(phase: i64) -> Result<Phase, SqliteStateError> {
         1 => Ok(Phase::In),
         _ => Err(SqliteStateError::invalid("invalid package phase")),
     }
+}
+
+const fn encode_reason(reason: RetirementReason) -> i64 {
+    match reason {
+        RetirementReason::HolderRemoved => 0,
+        RetirementReason::NoAcceptingEdge => 1,
+        RetirementReason::RouteRemoved => 2,
+        RetirementReason::Explicit => 3,
+    }
+}
+fn decode_reason(reason: i64) -> Result<RetirementReason, SqliteStateError> {
+    match reason {
+        0 => Ok(RetirementReason::HolderRemoved),
+        1 => Ok(RetirementReason::NoAcceptingEdge),
+        2 => Ok(RetirementReason::RouteRemoved),
+        3 => Ok(RetirementReason::Explicit),
+        _ => Err(SqliteStateError::invalid("invalid retirement reason")),
+    }
+}
+
+/// Removes one unconsumed live package from the frontier.
+fn clear_phase(
+    transaction: &Transaction<'_>,
+    package_id: PackageId,
+) -> Result<(), SqliteStateError> {
+    let producer = activation_blob(package_id.producer());
+    let output = u128_blob(package_id.output());
+    let changed = transaction.execute(
+        "UPDATE package_outputs SET phase = NULL
+         WHERE producer_activation = ?1 AND output_id = ?2
+           AND phase IS NOT NULL AND consumer_activation IS NULL",
+        params![producer.as_slice(), output.as_slice()],
+    )?;
+    if changed != 1 {
+        return Err(SqliteStateError::invalid("retired package is not live"));
+    }
+    Ok(())
+}
+
+fn insert_retirement(
+    transaction: &Transaction<'_>,
+    package_id: PackageId,
+    retirement: &Retirement,
+) -> Result<(), SqliteStateError> {
+    let producer = activation_blob(package_id.producer());
+    let output = u128_blob(package_id.output());
+    let evidence = retirement.evidence().map(activation_blob);
+    transaction.execute(
+        "INSERT INTO package_retirements
+            (producer_activation, output_id, reason, holder_node, phase, revision, evidence_activation)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            producer.as_slice(),
+            output.as_slice(),
+            encode_reason(retirement.reason()),
+            retirement.holder(),
+            encode_phase(retirement.phase()),
+            encode_u64(retirement.revision())?,
+            evidence.as_ref().map(<[u8; 16]>::as_slice)
+        ],
+    )?;
+    Ok(())
 }
 
 fn read_revision(connection: &Connection) -> Result<u64, SqliteStateError> {
@@ -1252,6 +1416,21 @@ fn create_schema(connection: &Connection) -> Result<(), SqliteStateError> {
             CHECK(phase IS NOT 1 OR edge_id IS NOT NULL),
             CHECK(consumer_activation IS NULL OR (phase IS NULL AND edge_id IS NOT NULL))
          );
+         CREATE TABLE package_retirements (
+            producer_activation BLOB NOT NULL CHECK(length(producer_activation) = 16),
+            output_id BLOB NOT NULL CHECK(length(output_id) = 16),
+            reason INTEGER NOT NULL CHECK(reason IN (0, 1, 2, 3)),
+            holder_node TEXT NOT NULL,
+            phase INTEGER NOT NULL CHECK(phase IN (0, 1)),
+            revision INTEGER NOT NULL CHECK(revision >= 1),
+            evidence_activation BLOB CHECK(evidence_activation IS NULL OR length(evidence_activation) = 16),
+            PRIMARY KEY(producer_activation, output_id),
+            FOREIGN KEY(producer_activation, output_id) REFERENCES package_outputs(producer_activation, output_id),
+            FOREIGN KEY(evidence_activation) REFERENCES activations(activation_id),
+            CHECK(evidence_activation IS NULL OR reason = 3),
+            CHECK(reason IS NOT 1 OR phase = 0),
+            CHECK(reason IS NOT 2 OR phase = 1)
+         );
          CREATE TABLE pending_heads (
             holder_node TEXT NOT NULL,
             authority BLOB NOT NULL,
@@ -1292,10 +1471,10 @@ fn fresh_activation_id(transaction: &Transaction<'_>) -> Result<ActivationId, Sq
     }
 }
 
-fn read_transfer_fact(
+fn read_custody_fact(
     transaction: &Transaction<'_>,
     package_id: PackageId,
-) -> Result<Option<SqliteTransferFact>, SqliteStateError> {
+) -> Result<Option<SqliteCustodyFact>, SqliteStateError> {
     let producer = activation_blob(package_id.producer());
     let output = u128_blob(package_id.output());
     let mut statement = transaction.prepare(
@@ -1324,11 +1503,11 @@ fn read_transfer_fact(
         || (consumed && (phase.is_some() || edge.is_none()))
     {
         return Err(SqliteStateError::invalid(
-            "transfer package custody and delivery facts disagree",
+            "package custody and delivery facts disagree",
         ));
     }
     let holder = Arc::<str>::from(row.get::<_, String>(5)?);
-    Ok(Some(SqliteTransferFact {
+    Ok(Some(SqliteCustodyFact {
         position: phase.map(|phase| Position::new(holder.clone(), phase)),
         consumed,
         package: Package {

@@ -57,6 +57,10 @@ impl AdmissionView for State {
             return PackageObservation::Consumed(consumer);
         }
         let Some(position) = self.positions.get(&package_id) else {
+            debug_assert!(
+                self.retirements.contains_key(&package_id),
+                "an unconsumed package without a position has a retirement record"
+            );
             return PackageObservation::Retired;
         };
         if position.phase != Phase::In {
@@ -92,7 +96,8 @@ fn pending_input(
 impl Kernel {
     /// Restores accepted activation records under one fixed graph definition.
     ///
-    /// This API does not restore graph rewrites or explicit transfers. Exporting
+    /// This API does not restore graph rewrites, explicit transfers, retirements,
+    /// or vocabulary extensions. Exporting
     /// such a state through [`State::to_parts`] is rejected. Restoration
     /// topologically replays the realized occurrence graph. Every
     /// activation, package edge, payload contract, carried authority, and

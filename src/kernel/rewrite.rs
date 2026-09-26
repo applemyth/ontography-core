@@ -8,12 +8,12 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::graph::{
-    AuthorityTransitionRule, ContentDigest, DefinitionError, Edge, EdgeDefinition, Graph, Node,
-    NodeDefinition, Payload, RootRule,
+    AuthorityTransitionRule, ContentDigest, DefinitionError, Edge, EdgeDefinition, Graph,
+    IngressMode, Node, NodeDefinition, Payload, RootRule,
 };
 
 use super::definition::Kernel;
-use super::frontier::{Delivery, Phase, Position, RetirementReason, cleanup};
+use super::frontier::{Delivery, Phase, Position, Retirement, RetirementReason, cleanup};
 use super::occurrence::{Package, PackageId, State};
 
 /// One annotated fragment in a production; its identifiers are rule-local symbols.
@@ -332,7 +332,7 @@ fn invalid_production(message: &str) -> RewriteError {
 fn invalid_match(message: &str) -> RewriteError {
     RewriteError::InvalidMatch(Arc::from(message))
 }
-fn invalid_state(message: &str) -> RewriteError {
+pub(super) fn invalid_state(message: &str) -> RewriteError {
     RewriteError::InvalidState(Arc::from(message))
 }
 
@@ -367,16 +367,39 @@ impl PreparedRewrite {
     /// Consumes the predecessor after its owner has established that it is still current.
     /// The `SQLite` owner uses its exclusive session identity, revision and graph binding;
     /// the public kernel commit checks exact state equality.
+    ///
+    /// Every retirement is recorded at the successor revision with the
+    /// package's predecessor holder and phase.
     pub(crate) fn into_successor(self) -> Result<(State, Arc<Kernel>), RewriteError> {
         let mut next = *self.base;
+        let revision = next
+            .revision
+            .checked_add(1)
+            .ok_or(RewriteError::RevisionExhausted)?;
+        for (package_id, reason) in self.retired {
+            let position = next
+                .positions
+                .get(&package_id)
+                .ok_or_else(|| invalid_state("retired package was not live"))?;
+            let previous = next.retirements.insert(
+                package_id,
+                Retirement {
+                    reason,
+                    holder: Arc::clone(&position.holder),
+                    phase: position.phase,
+                    revision,
+                    evidence: None,
+                },
+            );
+            if previous.is_some() {
+                return Err(invalid_state("retired package already has a retirement"));
+            }
+        }
         next.positions = self.positions;
         next.definition_fingerprint = *self.next_kernel.fingerprint();
         next.used_node_ids.extend(self.fresh_node_ids);
         next.used_edge_ids.extend(self.fresh_edge_ids);
-        next.revision = next
-            .revision
-            .checked_add(1)
-            .ok_or(RewriteError::RevisionExhausted)?;
+        next.revision = revision;
         Ok((next, self.next_kernel))
     }
 }
@@ -436,6 +459,31 @@ fn same_edge_definition(a: &EdgeDefinition, b: &EdgeDefinition) -> bool {
         && a.authority_match() == b.authority_match()
 }
 
+fn outgoing_by_source(graph: &Graph) -> BTreeMap<&str, BTreeSet<&str>> {
+    let mut outgoing = graph
+        .nodes()
+        .iter()
+        .map(|node| (node.id(), BTreeSet::new()))
+        .collect::<BTreeMap<_, _>>();
+    for edge in graph.edges() {
+        outgoing.entry(edge.source()).or_default().insert(edge.id());
+    }
+    outgoing
+}
+
+/// Nodes of `before` whose outgoing edge identity set differs in `after`.
+///
+/// Edge identities fix their annotations for a workflow lifetime, so an
+/// unchanged identity set means unchanged acceptance.
+fn changed_outgoing_sources<'a>(before: &'a Graph, after: &Graph) -> BTreeSet<&'a str> {
+    let after = outgoing_by_source(after);
+    outgoing_by_source(before)
+        .into_iter()
+        .filter(|(source, edges)| after.get(source) != Some(edges))
+        .map(|(source, _)| source)
+        .collect()
+}
+
 fn exact_bindings(map: &BTreeMap<Arc<str>, Arc<str>>, expected: BTreeSet<Arc<str>>) -> bool {
     map.keys().cloned().collect::<BTreeSet<_>>() == expected
         && map.values().collect::<BTreeSet<_>>().len() == map.len()
@@ -457,7 +505,7 @@ impl Kernel {
         fragment.admit(self)
     }
 
-    fn check_rewrite_state(&self, state: &State) -> Result<(), RewriteError> {
+    pub(super) fn check_rewrite_state(&self, state: &State) -> Result<(), RewriteError> {
         if state.definition_id != *self.id() || state.definition_fingerprint != *self.fingerprint()
         {
             return Err(RewriteError::StateMismatch);
@@ -714,8 +762,15 @@ impl Kernel {
 
     /// Admits a rewrite while requesting payload evidence only when needed.
     ///
-    /// Removed holders, delivered packages, absent routes, and metadata-rejected
-    /// edges never cause a payload read. Supplied bytes are verified by the kernel.
+    /// Cleanup is local to the rewrite. An `Out` package is rechecked against
+    /// every outgoing edge of its holder exactly when the holder's outgoing
+    /// edge identity set changed, whether by removal or by addition; an
+    /// unchanged holder keeps its packages even if none is routable. An `In`
+    /// package is retired only when its holder is an `All` receiver whose
+    /// incoming edge set no longer contains the delivery edge. Removed
+    /// holders, delivered packages, unchanged holders, absent routes, and
+    /// metadata-rejected edges never cause a payload read. Supplied bytes are
+    /// verified by the kernel.
     /// # Errors
     /// Returns structural, state, or required-evidence errors without mutation.
     pub fn prepare_rewrite_with_evidence(
@@ -731,10 +786,14 @@ impl Kernel {
             .ok_or_else(|| RewriteError::UnknownProduction(Arc::clone(&request.production_id)))?;
         let (next, survivors, fresh_node_ids, fresh_edge_ids) =
             self.structural_rewrite(state, production, &request.matching)?;
+        let changed_sources = changed_outgoing_sources(self.graph(), next.graph());
         let cleaned = cleanup(
             &state.positions,
             &survivors,
             |holder, package_id| -> Result<bool, RewriteError> {
+                if !changed_sources.contains(&holder) {
+                    return Ok(true);
+                }
                 let package = state
                     .package(package_id)
                     .ok_or_else(|| invalid_state("frontier names unknown package"))?;
@@ -751,6 +810,19 @@ impl Kernel {
                     }
                 }
                 Ok(false)
+            },
+            |holder, package_id| -> Result<bool, RewriteError> {
+                let delivery = state
+                    .deliveries
+                    .get(&package_id)
+                    .ok_or_else(|| invalid_state("received package has no delivery receipt"))?;
+                let node = next
+                    .node_definition(holder)
+                    .ok_or_else(|| invalid_state("surviving holder is absent from the result"))?;
+                Ok(match node.ingress_mode() {
+                    IngressMode::Any => true,
+                    IngressMode::All => next.incoming_edge_ids(holder).contains(&delivery.edge_id),
+                })
             },
         )?;
         Ok(PreparedRewrite {

@@ -11,7 +11,7 @@ use crate::graph::{
 };
 
 use super::definition::Kernel;
-use super::frontier::{Delivery, Phase, Position};
+use super::frontier::{Delivery, Phase, Position, Retirement, RetirementReason};
 use super::occurrence::{Activation, ActivationId, Package, PackageId, State, Trigger};
 use super::rewrite::RewriteFragment;
 
@@ -20,6 +20,7 @@ pub(crate) struct Checkpoint {
     pub(crate) packages: BTreeMap<PackageId, Package>,
     pub(crate) positions: BTreeMap<PackageId, Position>,
     pub(crate) deliveries: BTreeMap<PackageId, Delivery>,
+    pub(crate) retirements: BTreeMap<PackageId, Retirement>,
     pub(crate) used_node_ids: BTreeSet<Arc<str>>,
     pub(crate) used_edge_ids: BTreeSet<Arc<str>>,
     pub(crate) revision: u64,
@@ -33,6 +34,7 @@ impl State {
             packages: self.packages.clone(),
             positions: self.positions.clone(),
             deliveries: self.deliveries.clone(),
+            retirements: self.retirements.clone(),
             used_node_ids: self.used_node_ids.clone(),
             used_edge_ids: self.used_edge_ids.clone(),
             revision: self.revision,
@@ -58,6 +60,7 @@ impl Kernel {
             packages,
             positions,
             deliveries,
+            retirements,
             used_node_ids,
             used_edge_ids,
             revision,
@@ -194,13 +197,6 @@ impl Kernel {
         if visited != activations.len() {
             return Err("accepted activation references contain a causal cycle");
         }
-        let minimum_revision = u64::try_from(activations.len())
-            .ok()
-            .and_then(|count| count.checked_add(explicit_transfers))
-            .ok_or("revision overflow")?;
-        if revision < minimum_revision {
-            return Err("state revision predates its accepted activations or transfers");
-        }
         for (id, position) in &positions {
             let package = packages
                 .get(id)
@@ -213,6 +209,51 @@ impl Kernel {
                 return Err("live frontier custody, phase or consumption is inconsistent");
             }
         }
+        let mut explicit_retirements = 0_u64;
+        let mut structural_retirements = false;
+        for (id, retirement) in &retirements {
+            let package = packages
+                .get(id)
+                .ok_or("retirement names an unknown package")?;
+            if consumed_by.contains_key(id) || positions.contains_key(id) {
+                return Err("retired package is consumed or live");
+            }
+            if !retirement.is_consistent()
+                || package.node_id() != retirement.holder()
+                || !used_node_ids.contains(retirement.holder())
+                || (retirement.phase() == Phase::In) != deliveries.contains_key(id)
+                || retirement.revision() == 0
+                || retirement.revision() > revision
+                || retirement
+                    .evidence()
+                    .is_some_and(|evidence| !activations.contains_key(&evidence))
+            {
+                return Err("retirement record is inconsistent with package history");
+            }
+            if retirement.reason() == RetirementReason::Explicit {
+                explicit_retirements = explicit_retirements
+                    .checked_add(1)
+                    .ok_or("revision overflow")?;
+            } else {
+                structural_retirements = true;
+            }
+        }
+        if positions.len() + consumed_by.len() + retirements.len() != packages.len() {
+            return Err("packages are not partitioned into live, consumed, and retired");
+        }
+        // Structural retirements only arise from a rewrite, which is at least one
+        // further revision; without it a fixed-graph export would drop them.
+        let minimum_revision = u64::try_from(activations.len())
+            .ok()
+            .and_then(|count| count.checked_add(explicit_transfers))
+            .and_then(|count| count.checked_add(explicit_retirements))
+            .and_then(|count| count.checked_add(u64::from(structural_retirements)))
+            .ok_or("revision overflow")?;
+        if revision < minimum_revision {
+            return Err(
+                "state revision predates its accepted activations, transfers, or retirements",
+            );
+        }
         Ok(State {
             definition_id: self.id().clone(),
             definition_fingerprint: *self.fingerprint(),
@@ -221,6 +262,7 @@ impl Kernel {
             consumed_by,
             positions,
             deliveries,
+            retirements,
             revision,
             used_node_ids,
             used_edge_ids,
@@ -459,6 +501,123 @@ mod tests {
             current.restore_checkpoint(invalid).unwrap_err(),
             "accepted activation references contain a causal cycle"
         );
+    }
+
+    #[test]
+    fn checkpoint_validates_retirement_records_against_package_history() {
+        let (kernel, _) = fixture();
+        let mut state = kernel.empty_state();
+        let outbound = emit(&kernel, &mut state, false);
+        let received = emit(&kernel, &mut state, true);
+        let evidence = received.producer();
+        kernel.retire(&mut state, received, Some(evidence)).unwrap();
+        kernel.retire(&mut state, outbound, None).unwrap();
+        assert!(state.is_quiescent());
+        assert_eq!(
+            kernel.restore_checkpoint(state.checkpoint()).unwrap(),
+            state
+        );
+
+        let rejects = |mutate: &dyn Fn(&mut Checkpoint)| {
+            let mut invalid = state.checkpoint();
+            mutate(&mut invalid);
+            kernel.restore_checkpoint(invalid).is_err()
+        };
+        assert!(rejects(&|c| {
+            c.retirements.remove(&received);
+        }));
+        assert!(rejects(&|c| {
+            c.positions.insert(received, Position::new("B", Phase::In));
+        }));
+        assert!(rejects(&|c| {
+            c.retirements.get_mut(&received).unwrap().reason = RetirementReason::NoAcceptingEdge;
+        }));
+        assert!(rejects(&|c| {
+            c.retirements.get_mut(&outbound).unwrap().reason = RetirementReason::RouteRemoved;
+        }));
+        assert!(rejects(&|c| {
+            c.retirements.get_mut(&outbound).unwrap().evidence = Some(ActivationId::from_u128(7));
+        }));
+        assert!(rejects(&|c| {
+            c.retirements.get_mut(&outbound).unwrap().holder = Arc::from("B");
+        }));
+        assert!(rejects(&|c| {
+            c.retirements.get_mut(&outbound).unwrap().revision = 0;
+        }));
+        assert!(rejects(&|c| {
+            c.retirements.get_mut(&outbound).unwrap().revision = c.revision + 1;
+        }));
+        assert!(rejects(&|c| {
+            c.retirements.get_mut(&outbound).unwrap().phase = Phase::In;
+        }));
+        assert!(rejects(&|c| {
+            c.revision -= 1;
+        }));
+    }
+
+    #[test]
+    fn checkpoint_accepts_a_removed_holder_recorded_by_node_replacement() {
+        let (initial, _) = fixture();
+        let mut state = initial.empty_state();
+        let received = emit(&initial, &mut state, true);
+        let tag = AuthorityTag::new("run").unwrap();
+        let right = RewriteFragment::new(
+            vec![Node::new("A").unwrap(), Node::new("B2").unwrap()],
+            vec![Edge::new("ab2", "A", "B2").unwrap()],
+            ["A", "B2"]
+                .map(|node| NodeDefinition::new(node, ["node"], "value").unwrap())
+                .to_vec(),
+            vec![
+                EdgeDefinition::new("ab2", ["flow"], ["node"], ["node"], "value", [tag.clone()])
+                    .unwrap(),
+            ],
+            vec![],
+            vec![RootRule::new("A", Authority::new([tag])).unwrap()],
+        );
+        let grammar = RewriteGrammar::new([RewriteProduction::new(
+            "replace-b",
+            RewriteFragment::from_kernel(&initial),
+            BTreeSet::from([Arc::from("A")]),
+            BTreeSet::new(),
+            right,
+        )
+        .unwrap()])
+        .unwrap();
+        let request = RewriteRequest::new(
+            "replace-b",
+            RewriteMatch::new(
+                BTreeMap::from([
+                    (Arc::from("A"), Arc::from("A")),
+                    (Arc::from("B"), Arc::from("B")),
+                ]),
+                BTreeMap::from([(Arc::from("ab"), Arc::from("ab"))]),
+                BTreeMap::from([(Arc::from("B2"), Arc::from("B2"))]),
+                BTreeMap::from([(Arc::from("ab2"), Arc::from("ab2"))]),
+            ),
+        );
+        let prepared = initial
+            .prepare_rewrite(&state, &grammar, &request, &BTreeMap::new())
+            .unwrap();
+        assert_eq!(
+            prepared.retirements().get(&received),
+            Some(&RetirementReason::HolderRemoved)
+        );
+        let current = initial.commit_rewrite(&mut state, prepared).unwrap();
+        assert!(current.graph().node("B").is_none());
+        let retirement = state.retirement(received).unwrap();
+        assert_eq!(retirement.holder(), "B");
+        assert_eq!(retirement.phase(), Phase::In);
+        assert_eq!(
+            current.restore_checkpoint(state.checkpoint()).unwrap(),
+            state
+        );
+
+        let mut invalid = state.checkpoint();
+        invalid.retirements.get_mut(&received).unwrap().holder = Arc::from("A");
+        assert!(current.restore_checkpoint(invalid).is_err());
+        let mut invalid = state.checkpoint();
+        invalid.used_node_ids.remove("B");
+        assert!(current.restore_checkpoint(invalid).is_err());
     }
 
     #[test]

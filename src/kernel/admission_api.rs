@@ -218,8 +218,11 @@ impl ActivationProposal {
 /// Failure to restore persisted activation-owned occurrence records.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum StateRestoreError {
-    /// Fixed-graph history cannot encode a state changed by rewriting or transfer.
-    #[error("fixed-graph history export cannot encode graph rewrites or explicit transfers")]
+    /// Fixed-graph history cannot encode a state changed by rewriting, transfer,
+    /// retirement, or vocabulary extension.
+    #[error(
+        "fixed-graph history export cannot encode rewrites, transfers, retirements, or extensions"
+    )]
     UnsupportedDynamicState,
     /// Persisted definition binding does not match the reconstructing kernel.
     #[error(

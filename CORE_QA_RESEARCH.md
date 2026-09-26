@@ -16,13 +16,15 @@ snapshot's `src/lib.rs`. Build output stayed in `/tmp`.
 
 | Exact-snapshot probe | Result | Qualification |
 | --- | --- | --- |
-| Native `cargo test --offline --all-targets` with the local manifest | 40 passed, 1 ignored | Includes the in-source tests and retained probes; uses the local vendored dependency. |
-| In-source library tests | 30 passed | These are the tests present in this snapshot. |
+| Native `cargo test --offline --all-targets` with the local manifest | 50 passed, 1 ignored | Includes the in-source tests and retained probes; uses the local vendored dependency. |
+| In-source library tests | 33 passed | Includes the exhaustive cleanup worlds and checkpoint retirement validation. |
 | Sibling `calculus.rs` adapted to remove one unavailable `Trigger::Session` match arm | 52 passed, 1 ignored | This exercised this snapshot's source, but the transplanted test file is not in this checkout. |
 | Sibling `frontier_rewrite.rs` and `outbound_admission.rs`, with their helper module | 15 passed | These also exercised this snapshot's source. |
-| New [public API probes](tests/hypothesis_probes.rs) | 5 passed | These tests are retained in this checkout. |
+| New [public API probes](tests/hypothesis_probes.rs) | 7 passed | These tests are retained in this checkout. |
 | [Application API probes](tests/api_surface_probes.rs) | 4 passed | Root creation, caller scope, rewrite-grammar ownership, and nested JSON duplicate-key behavior. |
 | [Content-composition probe](tests/content_composition_probe.rs) | 1 passed | Workspace capture reuses an unchanged file, emits a small package envelope, and commits the declared content closure. |
+| [Frontier operation probes](tests/frontier_operations.rs) | 4 passed | Explicit retirement, `All` route removal, disjoint-rewrite commutativity, vocabulary extension. |
+| [Persistent frontier probe](tests/persistent_frontier.rs) | 1 passed | Retirement records and an extension survive reopen with an exact snapshot. |
 | Isolated SQL-failure/content-GC diagnostic | 1 passed | A rollback left no activation but its exact payload remained readable after garbage collection. |
 | [Desired orphan-reclamation regression](tests/orphan_retention_probe.rs) | 1 ignored | It asserts reclamation and currently fails if enabled. |
 
@@ -69,8 +71,10 @@ For one deliberately small comparison, hold `phase=In` and `holder=survives`
 fixed, and let the receipt's edge be `{unchanged, replaced}`. A model that
 requires the edge to remain unchanged covers one context cell; a model that
 requires only holder survival covers both. The existing unchanged-edge case
-fits both. The replaced-edge probe distinguishes them and supports the broader
-retention rule, while exposing a separate consumption problem. These two cells
+fits both. The replaced-edge probe distinguishes them: holder survival alone suffices at an
+`Any` receiver, while an `All` receiver additionally requires the delivery edge
+to remain in its incoming set, and the kernel now retires the receipt as
+`RouteRemoved` otherwise (O2). These two cells
 are an engineering analogue of extension size, not the paper's full semantic
 extension or a production probability estimate.
 
@@ -86,7 +90,7 @@ questions.
 | --- | --- | --- |
 | Parallel review and fan-out | One activation emits distinct packages; `Any` receives one and `All` receives one per concrete incoming edge. | Two-of-three quorum, optional reviewers, cancellation, and timeout are not native ingress modes. |
 | Gated deployment or release | Carried authority, exact transition rules, edge matching, immutable payload commitments. | A tag is not caller authentication; a rootable `All` node can still root without review inputs. |
-| Long-running adaptive routing | Outbound birth, explicit transfer, registered rewrite, frontier cleanup. | Rewrite/transfer order changes fate; a removed edge can strand an `All` receipt. |
+| Long-running adaptive routing | Outbound birth, explicit transfer, registered rewrite, frontier cleanup. | Rewrite/transfer order changes fate for overlapping rewrites; a removed route retires an `All` receipt as `RouteRemoved`. |
 | Audit and provenance | Unique producer, at most one consumer, activation DAG, fixed-graph verified restoration. | Dynamic rewrite/transfer history has trusted current-state reopen but no full public replay verification. |
 | Human or machine work queue | Durable sessions, pending pages, revision notifications, content store. | Scheduling, retries, external effects, and worker identity belong to the host, not the calculus. |
 | Multi-tenant or multi-entry workflow | Direct kernel accepts several root rules. | Application authoring declares one entry; caller identity is outside direct admission. |
@@ -126,23 +130,23 @@ declaration from a missing calculus operation.
 
 ## Confirmed public behavior in this snapshot
 
-**O1 — Identity topology does not imply identity state transition.** An
-outbound package may be born with no accepting route. An L=K=R rewrite of the
-same graph runs cleanup, retires that package as `NoAcceptingEdge`, and advances
-the revision while leaving activation history unchanged. The executable probe
-is `identity_graph_rewrite_can_retire_unroutable_outbound_work`; the operative
+**O1 — Cleanup is local to the rewrite** (revised 25 September 2026). An
+outbound package born with no accepting route survives an L=K=R rewrite of the
+same graph, which retires nothing and advances the revision. It is rechecked,
+and retired as `NoAcceptingEdge`, only by a rewrite that changes its holder's
+outgoing edge set, whether by removal or addition. Probes:
+`identity_graph_rewrite_retains_unroutable_outbound_work` and
+`changing_the_holders_outgoing_edges_rechecks_outbound_work`; the operative
 code is [cleanup](src/kernel/frontier.rs) and
-[rewrite preparation](src/kernel/rewrite.rs). A user interface should show
-retirements before committing even a visually unchanged rewrite.
+[rewrite preparation](src/kernel/rewrite.rs).
 
-**O2 — An `All` join can retain work that it cannot consume.** Deliver on `e1`
-to B, then rewrite `e1` into fresh `e2` while preserving B. Cleanup retains the
-`In` package. `All` admission requires a package from every *current* incoming
-edge, so the `e1` receipt cannot trigger B. The public probe asserts that the
-rejected activation is atomic and the frontier remains non-quiescent. Edge IDs
-cannot be reused, so this receipt cannot become current by restoring `e1` under
-the same identity. A later rewrite removing B can retire it. This is a liveness
-policy issue rather than a proven violation of the stated calculus.
+**O2 — A receipt at an `All` receiver is retired when its delivery edge leaves
+the incoming set** (revised 25 September 2026). Deliver on `e1` to B, then
+rewrite `e1` into fresh `e2` while preserving B. Cleanup retires the `In`
+package as `RouteRemoved`, records the retirement, and the frontier is
+quiescent. Edge IDs cannot be reused and a surviving node cannot change ingress
+mode, so no later operation could have consumed it. An `Any` receiver keeps its
+receipt. Probe: `replacing_an_all_join_edge_retires_the_stranded_receipt`.
 
 **O3 — Root expressiveness narrows at the application builder.** A direct
 kernel admitted and activated two independent roots. The application builder
@@ -220,7 +224,7 @@ capacity. Source locations are starting points for the test.
 
 | ID | Priority | Claim to challenge and discriminating experiment | Oracle |
 | --- | --- | --- | --- |
-| H1 | P0 | Rewrite-order independence: remove the sole accepting edge, then add a replacement; reverse the order. | Same final graph may have different frontiers; retirement never resurrects. Assert exact retirements and history in both traces. |
+| H1 | P0 | Rewrite-order independence: remove the sole accepting edge, then add a replacement; reverse the order. | **Observed:** rewrites with disjoint footprints commute on graph, frontier, and retirements (`disjoint_rewrites_commute_on_the_frontier`); overlapping rewrites remain order dependent by design. |
 | H2 | P0 | **Observed:** transfer on `e1` before deleting it versus delete first. | First trace retains an `In` receipt at the surviving receiver; second retires `Out` work and later transfer rejects. |
 | H3 | P0 | Cross-root merge: fork from separate roots, then join at `All`; vary authority, edge identity, and arrival order. | Equal carried authority and one package per current incoming edge; no double consumption; DAG ancestry includes both roots. |
 | H4 | P0 | Root bypass of approval: give an `All` node a root rule and no received approvals. | Legal root activation has zero inputs. Application policy must prevent treating `All` alone as approval authorization. |
@@ -233,7 +237,7 @@ capacity. Source locations are starting points for the test.
 | H11 | P1 | **Partly observed:** future schema vocabulary, starting with an empty-edge application and authority-bearing root; then try a rewrite introducing a new type/tag. | Direct `Kernel::admit` reserves the tag; builder rejects the isolated root. The later rewrite remains untested. |
 | H12 | P1 | Authoring parity: express multiple roots, custom edge types, grammar, and dynamic executable binding through direct Rust, native JSON, and concise project forms. | Produce a capability/rejection matrix; distinguish deliberate abstraction from silently dropped semantics. |
 | H13 | P1 | Fixed-graph restoration mutation: alter every canonical record field in turn, including producer, consumed edge, authority, digest, and definition fingerprint. | Invalid records reject; valid topological reorder restores the same canonical state and causal DAG. |
-| H14 | P1 | Receipt migration policy: replace an `All` node's edge after it receives work, then try every legal subsequent operation. | Find a recovery trace or prove it requires retiring the holder; define whether indefinite non-quiescence is acceptable. |
+| H14 | P1 | Receipt migration policy: replace an `All` node's edge after it receives work, then try every legal subsequent operation. | **Resolved:** the receipt is retired as `RouteRemoved` at the rewrite; see O2. |
 | H15 | P2 | Local rewrite cost: hold graph/frontier constant; compare 100 and 10,000 consumed roots with distinct result bytes. | Same semantic result; measure result reads, lock wait, latency, and peak memory. Source suggests full-history materialization. |
 | H16 | P2 | Width, depth, and session count: wide fan-out, deep static cycle, many tiny sessions, many concurrent readers/writers. | No overflow or state divergence; record throughput, p95 latency, peak RSS, thread/FD count, and failure threshold. |
 

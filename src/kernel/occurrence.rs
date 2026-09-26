@@ -8,7 +8,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::admission_api::StateRestoreError;
-use super::frontier::{Delivery, Phase, Position};
+use super::frontier::{Delivery, Phase, Position, Retirement};
 use crate::graph::{Authority, ContentDigest, DefinitionFingerprint, DefinitionId, Payload};
 
 /// Opaque identity of one activation occurrence.
@@ -336,7 +336,9 @@ impl Activation {
 
 /// Current frontier and accepted activation history.
 ///
-/// Package and consumer collections are derived historical views.
+/// Package and consumer collections are derived historical views. Every
+/// package is exactly one of live (in `positions`), consumed (in
+/// `consumed_by`), or retired (in `retirements`).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct State {
     pub(super) definition_id: DefinitionId,
@@ -346,6 +348,7 @@ pub struct State {
     pub(super) consumed_by: BTreeMap<PackageId, ActivationId>,
     pub(super) positions: BTreeMap<PackageId, Position>,
     pub(super) deliveries: BTreeMap<PackageId, Delivery>,
+    pub(super) retirements: BTreeMap<PackageId, Retirement>,
     pub(super) revision: u64,
     pub(super) used_node_ids: BTreeSet<Arc<str>>,
     pub(super) used_edge_ids: BTreeSet<Arc<str>>,
@@ -353,8 +356,9 @@ pub struct State {
 
 /// Accepted activation records for validation under one fixed graph.
 ///
-/// This format omits native graph rewrites and explicit transfers. The checked
-/// state export methods reject states containing either operation.
+/// This format omits graph rewrites, explicit transfers, retirements, and
+/// vocabulary extensions. The checked state export methods reject states
+/// containing any of them.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StateParts {
     pub(super) definition_id: DefinitionId,
@@ -433,7 +437,8 @@ impl State {
     /// Clones accepted activation records for fixed-graph persistence.
     ///
     /// # Errors
-    /// Rejects states changed by rewriting or explicit transfer.
+    /// Rejects states changed by rewriting, explicit transfer, retirement, or
+    /// vocabulary extension.
     pub fn to_parts(&self) -> Result<StateParts, StateRestoreError> {
         self.check_fixed_history()?;
         Ok(StateParts::new(
@@ -446,7 +451,8 @@ impl State {
     /// Consumes this state into accepted records for fixed-graph persistence.
     ///
     /// # Errors
-    /// Rejects states changed by rewriting or explicit transfer.
+    /// Rejects states changed by rewriting, explicit transfer, retirement, or
+    /// vocabulary extension.
     pub fn into_parts(self) -> Result<StateParts, StateRestoreError> {
         self.check_fixed_history()?;
         Ok(StateParts::new(
@@ -503,6 +509,18 @@ impl State {
     #[must_use]
     pub const fn deliveries(&self) -> &BTreeMap<PackageId, Delivery> {
         &self.deliveries
+    }
+
+    /// Returns every package removed from the frontier without consumption.
+    #[must_use]
+    pub const fn retirements(&self) -> &BTreeMap<PackageId, Retirement> {
+        &self.retirements
+    }
+
+    /// Looks up one package's retirement record, if it was retired.
+    #[must_use]
+    pub fn retirement(&self, package_id: PackageId) -> Option<&Retirement> {
+        self.retirements.get(&package_id)
     }
 
     /// Returns the monotone revision of this state.

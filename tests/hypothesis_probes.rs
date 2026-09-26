@@ -6,7 +6,7 @@ use std::sync::Arc;
 use ontography::{
     ActivationProposal, ApplicationBuilder, ApplicationError, Authority, AuthorityTag, Contract,
     DefinitionError, DefinitionId, Edge, EdgeDefinition, Emission, Graph, IngressMode, Kernel,
-    Node, NodeComponent, NodeConfig, NodeDefinition, OutputAuthority, PackageId, Phase,
+    Node, NodeComponent, NodeConfig, NodeDefinition, OutputAuthority, PackageId, Phase, Reject,
     RetirementReason, RewriteFragment, RewriteGrammar, RewriteMatch, RewriteProduction,
     RewriteRequest, RootRule, Schema,
 };
@@ -16,6 +16,10 @@ fn bytes(value: &'static [u8]) -> Arc<[u8]> {
 }
 
 fn tagged_kernel(edge: Option<&str>, ingress: IngressMode) -> Kernel {
+    tagged_kernel_with(edge, ingress, "item")
+}
+
+fn tagged_kernel_with(edge: Option<&str>, ingress: IngressMode, edge_contract: &str) -> Kernel {
     let tag = AuthorityTag::new("route").unwrap();
     let graph = Graph::new(
         [Node::new("a").unwrap(), Node::new("b").unwrap()],
@@ -37,7 +41,15 @@ fn tagged_kernel(edge: Option<&str>, ingress: IngressMode) -> Kernel {
                 .with_ingress_mode(ingress),
         ],
         edge.into_iter().map(|id| {
-            EdgeDefinition::new(id, ["Flow"], ["Node"], ["Node"], "item", [tag.clone()]).unwrap()
+            EdgeDefinition::new(
+                id,
+                ["Flow"],
+                ["Node"],
+                ["Node"],
+                edge_contract,
+                [tag.clone()],
+            )
+            .unwrap()
         }),
         [],
         [RootRule::new("a", Authority::new([tag.clone()])).unwrap()],
@@ -94,7 +106,7 @@ fn rewrite(
 }
 
 #[test]
-fn identity_graph_rewrite_can_retire_unroutable_outbound_work() {
+fn identity_graph_rewrite_retains_unroutable_outbound_work() {
     let kernel = tagged_kernel(None, IngressMode::Any);
     let mut state = kernel.empty_state();
     let package = root_outbound(&kernel, &mut state);
@@ -104,19 +116,43 @@ fn identity_graph_rewrite_can_retire_unroutable_outbound_work() {
     let prepared = kernel
         .prepare_rewrite(&state, &grammar, &request, &BTreeMap::new())
         .unwrap();
-    assert_eq!(
-        prepared.retirements().get(&package),
-        Some(&RetirementReason::NoAcceptingEdge)
-    );
+    assert!(prepared.retirements().is_empty());
     let history = state.activations().clone();
     let next = kernel.commit_rewrite(&mut state, prepared).unwrap();
     assert_eq!(next.fingerprint(), kernel.fingerprint());
     assert_eq!(state.activations(), &history);
-    assert!(state.position(package).is_none());
+    assert_eq!(state.position(package).unwrap().phase(), Phase::Out);
+    assert!(state.retirements().is_empty());
+    assert_eq!(state.revision(), 2);
 }
 
 #[test]
-fn replacing_an_all_join_edge_keeps_an_unusable_received_package_live() {
+fn changing_the_holders_outgoing_edges_rechecks_outbound_work() {
+    let kernel = tagged_kernel(None, IngressMode::Any);
+    let rejecting = tagged_kernel_with(Some("e1"), IngressMode::Any, "result");
+    let mut state = kernel.empty_state();
+    let package = root_outbound(&kernel, &mut state);
+
+    let (grammar, request) = rewrite(&kernel, &rejecting, None, Some("e1"));
+    let prepared = kernel
+        .prepare_rewrite(&state, &grammar, &request, &BTreeMap::new())
+        .unwrap();
+    assert_eq!(
+        prepared.retirements().get(&package),
+        Some(&RetirementReason::NoAcceptingEdge)
+    );
+    kernel.commit_rewrite(&mut state, prepared).unwrap();
+    assert!(state.position(package).is_none());
+    let retirement = state.retirement(package).unwrap();
+    assert_eq!(retirement.reason(), RetirementReason::NoAcceptingEdge);
+    assert_eq!(retirement.holder(), "a");
+    assert_eq!(retirement.phase(), Phase::Out);
+    assert_eq!(retirement.revision(), 2);
+    assert_eq!(retirement.evidence(), None);
+}
+
+#[test]
+fn replacing_an_all_join_edge_retires_the_stranded_receipt() {
     let old = tagged_kernel(Some("e1"), IngressMode::All);
     let new = tagged_kernel(Some("e2"), IngressMode::All);
     let mut state = old.empty_state();
@@ -131,21 +167,55 @@ fn replacing_an_all_join_edge_keeps_an_unusable_received_package_live() {
     let prepared = old
         .prepare_rewrite(&state, &grammar, &request, &evidence)
         .unwrap();
-    assert!(prepared.retirements().is_empty());
+    assert_eq!(
+        prepared.retirements().get(&package),
+        Some(&RetirementReason::RouteRemoved)
+    );
     let next = old.commit_rewrite(&mut state, prepared).unwrap();
-    assert_eq!(state.position(package).unwrap().holder(), "b");
-    assert_eq!(state.position(package).unwrap().phase(), Phase::In);
+    assert!(state.position(package).is_none());
+    assert!(state.is_quiescent());
+    let retirement = state.retirement(package).unwrap();
+    assert_eq!(retirement.reason(), RetirementReason::RouteRemoved);
+    assert_eq!(retirement.holder(), "b");
+    assert_eq!(retirement.phase(), Phase::In);
+    assert_eq!(retirement.revision(), 3);
+    assert_eq!(state.deliveries().get(&package).unwrap().edge_id(), "e1");
 
     let before = state.clone();
-    assert!(
+    assert!(matches!(
         next.activate(
             &mut state,
             ActivationProposal::package(package, bytes(b"result")),
-        )
-        .is_err()
-    );
+        ),
+        Err(Reject::PackageRetired { .. })
+    ));
     assert_eq!(state, before);
-    assert!(!state.is_quiescent());
+}
+
+#[test]
+fn surviving_any_receiver_keeps_its_receipt_after_route_replacement() {
+    let old = tagged_kernel(Some("e1"), IngressMode::Any);
+    let new = tagged_kernel(Some("e2"), IngressMode::Any);
+    let mut state = old.empty_state();
+    let package = root_outbound(&old, &mut state);
+    let prepared_transfer = old
+        .prepare_transfer(&state, package, "e1", b"item")
+        .unwrap();
+    old.commit_transfer(&mut state, prepared_transfer).unwrap();
+
+    let (grammar, request) = rewrite(&old, &new, Some("e1"), Some("e2"));
+    let prepared = old
+        .prepare_rewrite(&state, &grammar, &request, &BTreeMap::new())
+        .unwrap();
+    assert!(prepared.retirements().is_empty());
+    let next = old.commit_rewrite(&mut state, prepared).unwrap();
+    assert_eq!(state.position(package).unwrap().phase(), Phase::In);
+    next.activate(
+        &mut state,
+        ActivationProposal::package(package, bytes(b"result")),
+    )
+    .unwrap();
+    assert!(state.is_quiescent());
 }
 
 #[test]

@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use super::occurrence::PackageId;
+use super::occurrence::{ActivationId, PackageId};
 
 /// Whether a live package is awaiting transfer or has reached its receiver.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -84,13 +84,79 @@ impl Delivery {
     }
 }
 
-/// Why a combined rewrite removes a package from the live frontier.
+/// Why a package left the live frontier without being consumed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RetirementReason {
-    /// Its previous node incarnation was deleted or replaced.
+    /// Its previous node incarnation was deleted or replaced by a rewrite.
     HolderRemoved,
-    /// Its surviving producer has no outgoing edge accepting this package.
+    /// A rewrite changed its surviving producer's outgoing edges and none
+    /// accepts this package.
     NoAcceptingEdge,
+    /// A rewrite removed the edge that delivered it to a surviving `All`
+    /// receiver, so no current-edge join can ever include it.
+    RouteRemoved,
+    /// An admitted retire operation removed it.
+    Explicit,
+}
+
+/// Canonical record of one package's departure from the live frontier.
+///
+/// Live packages have a [`Position`], consumed packages have a consumer, and
+/// every other package has exactly one retirement. The three sets partition
+/// the package population of a valid state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Retirement {
+    pub(crate) reason: RetirementReason,
+    pub(crate) holder: Arc<str>,
+    pub(crate) phase: Phase,
+    pub(crate) revision: u64,
+    pub(crate) evidence: Option<ActivationId>,
+}
+
+impl Retirement {
+    /// Returns why the package was retired.
+    #[must_use]
+    pub const fn reason(&self) -> RetirementReason {
+        self.reason
+    }
+
+    /// Returns the node incarnation holding the package when it was retired.
+    #[must_use]
+    pub fn holder(&self) -> &str {
+        &self.holder
+    }
+
+    /// Returns the package's phase when it was retired.
+    #[must_use]
+    pub const fn phase(&self) -> Phase {
+        self.phase
+    }
+
+    /// Returns the state revision that recorded the retirement.
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Returns the activation cited as evidence by an explicit retirement.
+    #[must_use]
+    pub const fn evidence(&self) -> Option<ActivationId> {
+        self.evidence
+    }
+
+    /// Reports whether the reason admits this phase and evidence.
+    pub(crate) const fn is_consistent(&self) -> bool {
+        match self.reason {
+            RetirementReason::HolderRemoved => self.evidence.is_none(),
+            RetirementReason::NoAcceptingEdge => {
+                matches!(self.phase, Phase::Out) && self.evidence.is_none()
+            }
+            RetirementReason::RouteRemoved => {
+                matches!(self.phase, Phase::In) && self.evidence.is_none()
+            }
+            RetirementReason::Explicit => true,
+        }
+    }
 }
 
 pub(super) struct Cleanup {
@@ -99,11 +165,15 @@ pub(super) struct Cleanup {
 }
 
 /// Classifies every live package after separately validated structural admission.
-/// The callback is invoked only for Out packages with a surviving holder.
+///
+/// `accepts` is invoked only for `Out` packages with a surviving holder and
+/// `retains_receipt` only for `In` packages with a surviving holder. Neither
+/// is consulted for removed holders.
 pub(super) fn cleanup<E>(
     positions: &BTreeMap<PackageId, Position>,
     survivors: &BTreeMap<Arc<str>, Arc<str>>,
     mut accepts: impl FnMut(&str, PackageId) -> Result<bool, E>,
+    mut retains_receipt: impl FnMut(&str, PackageId) -> Result<bool, E>,
 ) -> Result<Cleanup, E> {
     let mut kept = BTreeMap::new();
     let mut retired = BTreeMap::new();
@@ -112,9 +182,11 @@ pub(super) fn cleanup<E>(
             retired.insert(package, RetirementReason::HolderRemoved);
             continue;
         };
-        if position.phase == Phase::Out && !accepts(holder, package)? {
-            retired.insert(package, RetirementReason::NoAcceptingEdge);
-        } else {
+        let retained = match position.phase {
+            Phase::Out => accepts(holder, package)?,
+            Phase::In => retains_receipt(holder, package)?,
+        };
+        if retained {
             kept.insert(
                 package,
                 Position {
@@ -122,6 +194,12 @@ pub(super) fn cleanup<E>(
                     phase: position.phase,
                 },
             );
+        } else {
+            let reason = match position.phase {
+                Phase::Out => RetirementReason::NoAcceptingEdge,
+                Phase::In => RetirementReason::RouteRemoved,
+            };
+            retired.insert(package, reason);
         }
     }
     Ok(Cleanup {
@@ -168,10 +246,16 @@ mod tests {
                         (old[source].clone(), new[destination - 1].clone())
                     })
                     .collect();
-                for acceptance in 0_u8..16 {
+                for masks in 0_u16..256 {
+                    let (acceptance, receipts) = (masks & 15, masks >> 4);
+                    let bit = |holder: &str, p: PackageId| -> u16 {
+                        1 << (u128::from(holder != &*new[0]) * 2 + p.output())
+                    };
                     let accepts = |holder: &str, p: PackageId| -> Result<bool, ()> {
-                        let holder_index = u128::from(holder != &*new[0]);
-                        Ok(acceptance & (1 << (holder_index * 2 + p.output())) != 0)
+                        Ok(acceptance & bit(holder, p) != 0)
+                    };
+                    let retain = |holder: &str, p: PackageId| -> Result<bool, ()> {
+                        Ok(receipts & bit(holder, p) != 0)
                     };
                     for first in &positions {
                         for second in &positions {
@@ -192,25 +276,24 @@ mod tests {
                                             .insert(*id, RetirementReason::HolderRemoved);
                                     }
                                     Some(holder) => {
-                                        let index =
-                                            new.iter().position(|node| node == holder).unwrap();
-                                        let supported = acceptance
-                                            & (1 << (index * 2
-                                                + usize::try_from(id.output()).unwrap()))
-                                            != 0;
-                                        if position.phase == Phase::In || supported {
+                                        let (mask, reason) = match position.phase {
+                                            Phase::Out => {
+                                                (acceptance, RetirementReason::NoAcceptingEdge)
+                                            }
+                                            Phase::In => (receipts, RetirementReason::RouteRemoved),
+                                        };
+                                        if mask & bit(holder, *id) != 0 {
                                             expected_kept.insert(
                                                 *id,
                                                 Position::new(holder.clone(), position.phase),
                                             );
                                         } else {
-                                            expected_retired
-                                                .insert(*id, RetirementReason::NoAcceptingEdge);
+                                            expected_retired.insert(*id, reason);
                                         }
                                     }
                                 }
                             }
-                            let cleaned = cleanup(&frontier, &survivors, accepts).unwrap();
+                            let cleaned = cleanup(&frontier, &survivors, accepts, retain).unwrap();
                             assert_eq!(cleaned.positions, expected_kept);
                             assert_eq!(cleaned.retired, expected_retired);
                             assert_eq!(
@@ -224,7 +307,8 @@ mod tests {
                                     .all(|id| !cleaned.retired.contains_key(id))
                             );
                             assert_eq!(frontier, original);
-                            let again = cleanup(&cleaned.positions, &identity, accepts).unwrap();
+                            let again =
+                                cleanup(&cleaned.positions, &identity, accepts, retain).unwrap();
                             assert_eq!(again.positions, cleaned.positions);
                             assert!(again.retired.is_empty());
                             worlds += 1;
@@ -233,7 +317,47 @@ mod tests {
                 }
             }
         }
-        assert_eq!(worlds, 2_800);
+        assert_eq!(worlds, 44_800);
+    }
+
+    #[test]
+    fn receipt_callback_governs_only_received_packages_at_survivors() {
+        let survivors = BTreeMap::from([(Arc::<str>::from("s"), Arc::<str>::from("s"))]);
+        let frontier = BTreeMap::from([
+            (package(0), Position::new("s", Phase::Out)),
+            (package(1), Position::new("s", Phase::In)),
+            (package(2), Position::new("gone", Phase::In)),
+            (package(3), Position::new("gone", Phase::Out)),
+        ]);
+        let mut asked_out = Vec::new();
+        let mut asked_in = Vec::new();
+        let cleaned = cleanup(
+            &frontier,
+            &survivors,
+            |holder, p| {
+                asked_out.push((holder.to_owned(), p));
+                Ok::<_, ()>(true)
+            },
+            |holder, p| {
+                asked_in.push((holder.to_owned(), p));
+                Ok(false)
+            },
+        )
+        .unwrap();
+        assert_eq!(asked_out, vec![("s".to_owned(), package(0))]);
+        assert_eq!(asked_in, vec![("s".to_owned(), package(1))]);
+        assert_eq!(
+            cleaned.positions,
+            BTreeMap::from([(package(0), Position::new("s", Phase::Out))])
+        );
+        assert_eq!(
+            cleaned.retired,
+            BTreeMap::from([
+                (package(1), RetirementReason::RouteRemoved),
+                (package(2), RetirementReason::HolderRemoved),
+                (package(3), RetirementReason::HolderRemoved),
+            ])
+        );
     }
 
     #[test]
@@ -251,8 +375,13 @@ mod tests {
                     } else {
                         BTreeMap::new()
                     };
-                    let cleaned =
-                        cleanup(&frontier, &survives, |_, _| Ok::<_, ()>(choice & 2 != 0)).unwrap();
+                    let cleaned = cleanup(
+                        &frontier,
+                        &survives,
+                        |_, _| Ok::<_, ()>(choice & 2 != 0),
+                        |_, _| Ok(true),
+                    )
+                    .unwrap();
                     assert!(cleaned.positions.keys().all(|id| frontier.contains_key(id)));
                     if ever_retired {
                         assert!(cleaned.positions.is_empty());

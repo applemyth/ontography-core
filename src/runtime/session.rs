@@ -23,9 +23,9 @@ use super::object_store::ObjectStore;
 use super::sqlite::{OpenedSqliteSession, SqlitePreparedRewrite, SqliteSession};
 use crate::content::{ContentId, ContentReader, ContentStore};
 use crate::{
-    ActivationId, ActivationProposal, ContentDigest, Delivery, Kernel, Package, PackageId, Payload,
-    Phase, Reject, RetirementReason, RewriteError, RewriteGrammar, RewriteRequest, State,
-    StateParts, StateRestoreError, TransferError,
+    ActivationId, ActivationProposal, ContentDigest, Delivery, ExtensionError, Kernel, Package,
+    PackageId, Payload, Phase, Reject, RetireError, Retirement, RetirementReason, RewriteError,
+    RewriteGrammar, RewriteRequest, State, StateParts, StateRestoreError, TransferError,
 };
 
 type Text = Arc<str>;
@@ -77,6 +77,12 @@ pub enum SessionTransitionError {
     /// The kernel rejected the transfer without mutation.
     #[error(transparent)]
     Transfer(#[from] TransferError),
+    /// The kernel rejected the retirement without mutation.
+    #[error(transparent)]
+    Retire(#[from] RetireError),
+    /// The kernel rejected the vocabulary extension without mutation.
+    #[error(transparent)]
+    Extension(#[from] ExtensionError),
     /// Preparation could not read its required state or evidence.
     #[error("transition preparation storage failed: {0}")]
     Storage(Text),
@@ -617,6 +623,55 @@ impl SessionCore {
         }
     }
 
+    async fn retire(
+        &self,
+        package_id: PackageId,
+        evidence: Option<ActivationId>,
+    ) -> Result<Retirement, SessionTransitionError> {
+        let mut inner = self.inner.lock().await;
+        require_open(&inner)?;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let kernel = Arc::clone(&inner.kernel);
+            inner.facts.retire(&kernel, package_id, evidence)
+        }));
+        match result {
+            Ok(Ok(Ok(commit))) => {
+                publish_revision(&mut inner, &self.frontier, commit.revision);
+                Ok(commit.retirement)
+            }
+            Ok(Ok(Err(reject))) => Err(SessionTransitionError::Retire(reject)),
+            Ok(Err(error)) => Err(SessionTransitionError::Faulted(
+                self.fault(&mut inner, Arc::from(error.to_string())),
+            )),
+            Err(panic) => Err(SessionTransitionError::Faulted(
+                self.fault(&mut inner, panic_message(panic)),
+            )),
+        }
+    }
+
+    async fn extend(&self, next: Arc<Kernel>) -> Result<u64, SessionTransitionError> {
+        let mut inner = self.inner.lock().await;
+        require_open(&inner)?;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let kernel = Arc::clone(&inner.kernel);
+            inner.facts.extend(&kernel, &next)
+        }));
+        match result {
+            Ok(Ok(Ok(revision))) => {
+                inner.kernel = next;
+                publish_revision(&mut inner, &self.frontier, revision);
+                Ok(revision)
+            }
+            Ok(Ok(Err(reject))) => Err(SessionTransitionError::Extension(reject)),
+            Ok(Err(error)) => Err(SessionTransitionError::Faulted(
+                self.fault(&mut inner, Arc::from(error.to_string())),
+            )),
+            Err(panic) => Err(SessionTransitionError::Faulted(
+                self.fault(&mut inner, panic_message(panic)),
+            )),
+        }
+    }
+
     fn fault(&self, inner: &mut SessionState, message: Text) -> Text {
         // A storage error can leave commit acknowledgment uncertain. Every
         // coherent read is fenced until reopening resolves the durable state.
@@ -924,6 +979,33 @@ impl SessionHandle {
         edge_id: &str,
     ) -> Result<Delivery, SessionTransitionError> {
         self.core.transfer(package_id, edge_id).await
+    }
+
+    /// Retires one live package, citing an optional accepted activation as evidence.
+    ///
+    /// The package leaves the frontier and a canonical retirement record is
+    /// stored; history, deliveries, and immutable package facts are unchanged.
+    ///
+    /// # Errors
+    /// Returns the kernel's retirement rejection or a session/storage failure.
+    pub async fn retire(
+        &self,
+        package_id: PackageId,
+        evidence: Option<ActivationId>,
+    ) -> Result<Retirement, SessionTransitionError> {
+        self.core.retire(package_id, evidence).await
+    }
+
+    /// Installs a monotone vocabulary extension of the current definition.
+    ///
+    /// `next` must keep the graph, annotations, and existing contracts
+    /// unchanged and add schema vocabulary or contracts. The frontier is
+    /// untouched. Reopening the session later requires supplying `next`.
+    ///
+    /// # Errors
+    /// Returns the kernel's extension rejection or a session/storage failure.
+    pub async fn extend(&self, next: Arc<Kernel>) -> Result<u64, SessionTransitionError> {
+        self.core.extend(next).await
     }
 
     /// Submits one canonical root or package-triggered proposal.
@@ -1494,8 +1576,8 @@ impl ProposalRuntime {
     /// current graph fingerprint must match this runtime's initial kernel.
     /// It is intended for imported-state
     /// validation and audits, not bounded-memory routine restart. Runs containing
-    /// rewrites or explicit transfers require trusted current-state loading via
-    /// [`Self::open_persistent`].
+    /// rewrites, explicit transfers, retirements, or vocabulary extensions require
+    /// trusted current-state loading via [`Self::open_persistent`].
     ///
     /// # Errors
     ///

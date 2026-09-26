@@ -417,6 +417,7 @@ impl Kernel {
             consumed_by: BTreeMap::new(),
             positions: BTreeMap::new(),
             deliveries: BTreeMap::new(),
+            retirements: BTreeMap::new(),
             revision: 0,
             used_node_ids: self.graph.nodes().iter().map(Node::id_arc).collect(),
             used_edge_ids: self.graph.edges().iter().map(Edge::id_arc).collect(),

@@ -1,8 +1,9 @@
 //! Ontography: authority-governed workflow occurrence graphs.
 //!
 //! Graph declarations compile into immutable kernel versions. The kernel checks
-//! activations, transfers, and interface-preserving graph rewrites with frontier
-//! cleanup. Runtime sessions persist and serialize these actions together.
+//! activations, transfers, explicit retirements, interface-preserving graph
+//! rewrites with local frontier cleanup, and monotone vocabulary extensions.
+//! Runtime sessions persist and serialize these actions together.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -36,11 +37,11 @@ pub use graph::{
     Graph, IngressMode, Node, NodeDefinition, Payload, RootRule, Schema,
 };
 pub use kernel::{
-    Activation, ActivationId, ActivationProposal, Delivery, EdgeUse, Emission, Kernel, Output,
-    OutputAuthority, Package, PackageId, Phase, Position, PreparedRewrite, PreparedTransfer,
-    Reject, RetirementReason, RewriteError, RewriteFragment, RewriteGrammar, RewriteMatch,
-    RewriteProduction, RewriteRequest, State, StateParts, StateRestoreError, TransferError,
-    Trigger, TriggerWitness,
+    Activation, ActivationId, ActivationProposal, Delivery, EdgeUse, Emission, ExtensionError,
+    Kernel, Output, OutputAuthority, Package, PackageId, Phase, Position, PreparedExtension,
+    PreparedRewrite, PreparedTransfer, Reject, RetireError, Retirement, RetirementReason,
+    RewriteError, RewriteFragment, RewriteGrammar, RewriteMatch, RewriteProduction, RewriteRequest,
+    State, StateParts, StateRestoreError, TransferError, Trigger, TriggerWitness,
 };
 pub use package::{
     PackageDocument, PackageEnvelope, PackageError, PackageLimits, PackageStore, ResolvedEntry,
