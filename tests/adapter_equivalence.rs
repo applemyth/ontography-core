@@ -11,7 +11,8 @@
 //! outgoing edges swapped for rejecting ones so outbound work retires as
 //! `NoAcceptingEdge`, and rejected rewrites and extensions. The snapshot
 //! itself runs the adapter's own projection check, so a drifted index fails
-//! the step.
+//! the step. A required prefix constructs the rare retirement and stale-plan
+//! cases before random exploration, so coverage is independent of generated ids.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -25,7 +26,8 @@ use ontography::{
     SessionHandle, State,
 };
 
-/// Deterministic xorshift generator so every seed replays exactly.
+/// Deterministic choice stream. Runtime-generated ids still affect the order
+/// of candidate packages, so a seed alone does not reproduce an entire history.
 struct Rng(u64);
 
 impl Rng {
@@ -718,6 +720,131 @@ async fn submit(session: &SessionHandle, mirror: &mut Mirror, proposal: Activati
     }
 }
 
+/// Establish every required coverage case by construction. In particular,
+/// reaching `d` requires a complete join at `c`; random choices of UUID-ordered
+/// packages cannot guarantee that path before a later reap.
+async fn required_prefix(
+    session: &SessionHandle,
+    mirror: &mut Mirror,
+    grammar: &RewriteGrammar,
+    seed: u64,
+) {
+    let spawn = cd_request(mirror);
+    rewrite_both(session, mirror, grammar, &spawn).await;
+    check(session, mirror, 0, seed).await;
+
+    let request = bc_request(mirror);
+    let session_plan = session.prepare_rewrite(&request).await.unwrap().unwrap();
+    let mirror_plan = mirror
+        .kernel
+        .prepare_rewrite(&mirror.state, grammar, &request, &mirror.evidence)
+        .unwrap();
+
+    let bytes: Payload = Arc::from(b"prefix-item".as_slice());
+    mirror.remember(&bytes);
+    let mut root = ActivationProposal::root(
+        "a",
+        Authority::new([tag("route")]),
+        Arc::from(b"result".as_slice()),
+    );
+    for edge in [&mirror.ab_edge, &mirror.ac_edge] {
+        root.emit(Emission::new(
+            edge.as_str(),
+            OutputAuthority::Carry,
+            bytes.clone(),
+        ));
+    }
+    root.emit(Emission::outbound(
+        "Item",
+        OutputAuthority::Carry,
+        bytes.clone(),
+    ));
+    submit(session, mirror, root).await;
+    check(session, mirror, 1, seed).await;
+    assert_eq!(
+        session
+            .commit_rewrite(session_plan)
+            .await
+            .unwrap()
+            .unwrap_err(),
+        RewriteError::Stale
+    );
+    assert_eq!(
+        mirror
+            .kernel
+            .commit_rewrite(&mut mirror.state, mirror_plan)
+            .unwrap_err(),
+        RewriteError::Stale
+    );
+    mirror.saw_stale = true;
+    check(session, mirror, 2, seed).await;
+
+    let at_b = mirror
+        .state
+        .live()
+        .find(|(_, record)| record.holder() == "b")
+        .unwrap()
+        .0;
+    let mut through_b = ActivationProposal::package(at_b, Arc::from(b"result".as_slice()));
+    through_b.emit(Emission::new(
+        mirror.bc_edge.as_deref().unwrap(),
+        OutputAuthority::Carry,
+        bytes.clone(),
+    ));
+    submit(session, mirror, through_b).await;
+    check(session, mirror, 3, seed).await;
+
+    let inputs = expected_all_trigger(mirror, "c");
+    assert_eq!(inputs.len(), 2, "prefix must prepare the complete All join");
+    let (holder, edge) = mirror.cd.clone().unwrap();
+    let mut through_c = ActivationProposal::join(inputs, Arc::from(b"result".as_slice()));
+    through_c.emit(Emission::new(edge, OutputAuthority::Carry, bytes));
+    submit(session, mirror, through_c).await;
+    check(session, mirror, 4, seed).await;
+    let at_d = mirror
+        .state
+        .live()
+        .find(|(_, record)| record.holder() == holder)
+        .unwrap()
+        .0;
+    let reap = cd_request(mirror);
+    rewrite_both(session, mirror, grammar, &reap).await;
+    assert_eq!(
+        mirror
+            .state
+            .package(at_d)
+            .unwrap()
+            .retirement()
+            .map(Retirement::reason),
+        Some(RetirementReason::HolderRemoved)
+    );
+    mirror.saw_reap = true;
+    check(session, mirror, 5, seed).await;
+
+    let outbound = mirror
+        .state
+        .live()
+        .find(|(_, record)| record.holder() == "a")
+        .unwrap()
+        .0;
+    let poison = a_request(mirror);
+    rewrite_both(session, mirror, grammar, &poison).await;
+    assert_eq!(
+        mirror
+            .state
+            .package(outbound)
+            .unwrap()
+            .retirement()
+            .map(Retirement::reason),
+        Some(RetirementReason::NoAcceptingEdge)
+    );
+    mirror.saw_no_accepting_edge = true;
+    check(session, mirror, 6, seed).await;
+    let cure = a_request(mirror);
+    rewrite_both(session, mirror, grammar, &cure).await;
+    check(session, mirror, 7, seed).await;
+}
+
 #[tokio::test]
 async fn sqlite_adapter_and_in_memory_state_agree_on_random_histories() {
     let mut saw_stale = false;
@@ -756,9 +883,10 @@ async fn sqlite_adapter_and_in_memory_state_agree_on_random_histories() {
             saw_reap: false,
             saw_no_accepting_edge: false,
         };
+        required_prefix(&session, &mut mirror, &grammar, seed).await;
         for step_index in 0..120 {
             step(&mut rng, &session, &mut mirror, &grammar).await;
-            check(&session, &mirror, step_index, seed).await;
+            check(&session, &mirror, step_index + 8, seed).await;
         }
         let final_state = session.snapshot().await;
         assert!(final_state.state().packages().values().all(
