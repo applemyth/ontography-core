@@ -7,7 +7,7 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use serde::de::{MapAccess, Visitor};
+use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 use thiserror::Error;
@@ -68,6 +68,61 @@ where
     deserializer.deserialize_map(UniqueStringMapVisitor(PhantomData))
 }
 
+pub(crate) struct UniqueJson;
+
+impl<'de> Deserialize<'de> for UniqueJson {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(UniqueJsonVisitor)
+    }
+}
+
+struct UniqueJsonVisitor;
+
+impl<'de> Visitor<'de> for UniqueJsonVisitor {
+    type Value = UniqueJson;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("JSON with unique object keys")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut keys = BTreeSet::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if !keys.insert(key.clone()) {
+                return Err(serde::de::Error::custom(format!(
+                    "duplicate JSON key {key:?}"
+                )));
+            }
+            let _ = map.next_value::<UniqueJson>()?;
+        }
+        Ok(UniqueJson)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        while seq.next_element::<UniqueJson>()?.is_some() {}
+        Ok(UniqueJson)
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self::Value, E> {
+        Ok(UniqueJson)
+    }
+    fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Self::Value, E> {
+        Ok(UniqueJson)
+    }
+    fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Self::Value, E> {
+        Ok(UniqueJson)
+    }
+    fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
+        Ok(UniqueJson)
+    }
+    fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
+        Ok(UniqueJson)
+    }
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(UniqueJson)
+    }
+}
+
 /// A complete JSON-declarable application awaiting trusted implementation resolution.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -92,6 +147,7 @@ impl ApplicationConfig {
     /// Returns an error when the JSON is malformed or does not match the closed
     /// declarative configuration shape.
     pub fn from_json(json: &str) -> Result<Self, ApplicationConfigError> {
+        let _: UniqueJson = serde_json::from_str(json)?;
         Ok(serde_json::from_str(json)?)
     }
 }

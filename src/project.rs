@@ -4,17 +4,16 @@
 //! resolves declarations and bindings; it does not install environments, run
 //! components, infer authority, or impose a payload protocol on implementations.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Value, json};
 use thiserror::Error;
 
-use crate::config::deserialize_unique_string_map;
+use crate::config::{UniqueJson, deserialize_unique_string_map};
 use crate::{
     Application, ApplicationConfig, ApplicationConfigError, ApplicationRegistry, IngressMode,
 };
@@ -704,59 +703,4 @@ fn deserialize_ingress_modes<'de, D: Deserializer<'de>>(
         .into_iter()
         .map(|mode| parse_ingress(&mode))
         .collect()
-}
-
-struct UniqueJson;
-
-impl<'de> Deserialize<'de> for UniqueJson {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_any(UniqueJsonVisitor)
-    }
-}
-
-struct UniqueJsonVisitor;
-
-impl<'de> Visitor<'de> for UniqueJsonVisitor {
-    type Value = UniqueJson;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("JSON with unique object keys")
-    }
-
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-        let mut keys = BTreeSet::new();
-        while let Some(key) = map.next_key::<String>()? {
-            if !keys.insert(key.clone()) {
-                return Err(serde::de::Error::custom(format!(
-                    "duplicate JSON key {key:?}"
-                )));
-            }
-            let _ = map.next_value::<UniqueJson>()?;
-        }
-        Ok(UniqueJson)
-    }
-
-    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-        while seq.next_element::<UniqueJson>()?.is_some() {}
-        Ok(UniqueJson)
-    }
-
-    fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self::Value, E> {
-        Ok(UniqueJson)
-    }
-    fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Self::Value, E> {
-        Ok(UniqueJson)
-    }
-    fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Self::Value, E> {
-        Ok(UniqueJson)
-    }
-    fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
-        Ok(UniqueJson)
-    }
-    fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
-        Ok(UniqueJson)
-    }
-    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-        Ok(UniqueJson)
-    }
 }
