@@ -553,8 +553,9 @@ impl ContentStore {
     }
 
     /// Retains `ids` under the protected ledger namespace: each is verified
-    /// complete once, fenced to disk, and tagged as both an artifact and a
-    /// ledger artifact, and the database is synced once after the last tag.
+    /// complete once, fenced to disk, and tagged as a ledger artifact. The
+    /// database is synced once after the last tag. Ordinary import ownership
+    /// is independent and is never created by ledger publication.
     /// The object-store worker calls this when a committed ledger reference
     /// names imported content.
     ///
@@ -568,16 +569,55 @@ impl ContentStore {
             self.verify_id(*id).await?;
             self.fence(*id).await?;
             let value = HashAndFormat::new(id.hash, id.format);
-            for tag in [
-                tags::artifact(id.hash, id.format),
-                tags::ledger_artifact(id.hash, id.format),
-            ] {
-                self.native
-                    .tags()
-                    .set(tag, value)
-                    .await
-                    .map_err(backend_error)?;
+            self.native
+                .tags()
+                .set(tags::ledger_artifact(id.hash, id.format), value)
+                .await
+                .map_err(backend_error)?;
+        }
+        self.native.sync_db().await.map_err(backend_error)
+    }
+
+    /// Removes ledger tags absent from the owner's complete committed reference set.
+    /// Ordinary artifact tags and temporary pins are preserved.
+    ///
+    /// The caller must exclusively own the ledger and serialize this operation
+    /// with publication. Supply references from all graph and invocation tables.
+    ///
+    /// # Errors
+    /// Reports tag enumeration, deletion, or durability failures.
+    pub async fn reconcile_ledger(
+        &self,
+        payloads: &[ContentDigest],
+        contents: &[ContentId],
+    ) -> Result<()> {
+        let expected: HashSet<Vec<u8>> = payloads
+            .iter()
+            .map(|digest| tags::ledger_payload(*digest).to_vec())
+            .chain(
+                contents
+                    .iter()
+                    .map(|id| tags::ledger_artifact(id.hash, id.format).into_bytes()),
+            )
+            .collect();
+        let _guard = self.gate.lock().await;
+        let mut tags = std::pin::pin!(self.native.tags().list().await.map_err(backend_error)?);
+        let mut obsolete = Vec::new();
+        while let Some(tag) = tags.next().await {
+            let name = tag.map_err(backend_error)?.name;
+            let bytes: &[u8] = name.as_ref();
+            if (bytes.len() == 32 || bytes.starts_with(b"ontography-ledger-artifact:"))
+                && !expected.contains(bytes)
+            {
+                obsolete.push(name);
             }
+        }
+        for name in obsolete {
+            self.native
+                .tags()
+                .delete(name)
+                .await
+                .map_err(backend_error)?;
         }
         self.native.sync_db().await.map_err(backend_error)
     }

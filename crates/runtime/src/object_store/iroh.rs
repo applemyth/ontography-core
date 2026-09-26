@@ -34,6 +34,7 @@ pub(super) enum Command {
     Verify(Vec<ContentId>, Reply<()>),
     Size(ContentDigest, Reply<Option<u64>>),
     Protect(Vec<ContentId>, Reply<Vec<TempTag>>),
+    Reconcile(Vec<ContentDigest>, Vec<ContentId>, Reply<()>),
 }
 
 /// The worker thread and its executor. The last owner joins it on drop.
@@ -207,6 +208,13 @@ fn run(
     {
         for command in requests {
             match command {
+                Command::Reconcile(payloads, contents, reply) => {
+                    let _ = reply.send(
+                        runtime
+                            .block_on(content.reconcile_ledger(&payloads, &contents))
+                            .map_err(|e| api_error(path, e)),
+                    );
+                }
                 Command::Put(objects, reply) => {
                     let _ = reply.send(runtime.block_on(async {
                         let _guard = gate.lock().await;

@@ -72,6 +72,15 @@ impl ObjectStore {
             .request(|reply| Command::Retain(ids.to_vec(), reply))
     }
 
+    pub(super) fn reconcile(
+        &self,
+        payloads: Vec<ContentDigest>,
+        contents: Vec<ContentId>,
+    ) -> Result<(), ObjectStoreError> {
+        self.worker
+            .request(|reply| Command::Reconcile(payloads, contents, reply))
+    }
+
     pub(super) fn protect_content(
         &self,
         ids: &[ContentId],

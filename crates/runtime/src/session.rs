@@ -702,6 +702,12 @@ impl SessionCore {
                 "{message}; the durable fault marker could not be written: {error}"
             )),
         };
+        let message = match inner.facts.reconcile_objects(&inner.objects) {
+            Ok(()) => message,
+            Err(error) => Arc::from(format!(
+                "{message}; content reconciliation requires reopening: {error}"
+            )),
+        };
         inner.readable = false;
         inner.fault = Some(Arc::clone(&message));
         inner.status = SessionStatus::Faulted;
@@ -1518,10 +1524,12 @@ impl ProposalRuntime {
     /// fixed schema, and contract registry; its topology may differ from the
     /// runtime's initial graph. This path trusts a store previously created and
     /// exclusively owned by this implementation; it does not replay historical
-    /// contracts or rewrites. Open sessions resume admission. Closed and faulted
-    /// sessions retain their terminal lifecycle with coherent read access.
-    /// Every open checks the derived readiness indexes against the canonical
-    /// package rows, at O(frontier) cost.
+    /// contracts or rewrites. Open sessions resume admission. Faulted sessions
+    /// resume only after checkpoint, content, and invocation integrity checks;
+    /// closed sessions retain their terminal lifecycle with coherent read access.
+    /// Every open checks derived readiness against the frontier and scans
+    /// committed graph and invocation references to reclaim orphan ledger tags.
+    /// Fault recovery additionally reads and verifies all committed content.
     ///
     /// # Errors
     ///
@@ -1618,9 +1626,18 @@ impl ProposalRuntime {
 
     fn open_sqlite(
         &self,
-        opened: OpenedSqliteSession,
+        mut opened: OpenedSqliteSession,
         objects: ObjectStore,
     ) -> Result<SessionHandle, SessionOpenError> {
+        if opened.status == SessionStatus::Faulted {
+            opened
+                .session
+                .recover_fault(&opened.current_kernel, &objects)?;
+            opened.status = SessionStatus::Open;
+            opened.fault = None;
+        } else {
+            opened.session.reconcile_objects(&objects)?;
+        }
         let OpenedSqliteSession {
             session: sqlite,
             current_kernel,
@@ -2151,6 +2168,26 @@ mod tests {
         assert!(matches!(
             session.try_snapshot().await,
             Err(SessionError::Faulted(retained)) if retained == message
+        ));
+        drop(session);
+        drop(runtime);
+        with_detached_connection(
+            &run,
+            "DROP TRIGGER fail_revision; DROP TRIGGER fail_marker;",
+        );
+        let runtime = ProposalRuntime::new(Arc::clone(&kernel));
+        let session = runtime.open_persistent(&run).expect("recovered session");
+        assert_eq!(session.status(), SessionStatus::Open);
+        assert_eq!(
+            session
+                .content(ContentDigest::compute(b"one"))
+                .await
+                .expect("orphan lookup"),
+            None
+        );
+        assert!(matches!(
+            session.submit(root(&kernel, b"retry", None)).await,
+            Ok(ProposalDecision::Committed(_))
         ));
     }
 

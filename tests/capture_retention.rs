@@ -30,11 +30,11 @@ async fn rejected_finish_preserves_other_uncommitted_package() {
         }),
         ..ContextPolicy::default()
     });
-    let component = NodeComponent::new(config, move |context: ApplicationContext| {
+    let component = NodeComponent::new(config, move |invocation: ApplicationContext| {
         let tx = tx.clone();
         let done = worker_done.clone();
         async move {
-            tx.send(context).unwrap();
+            tx.send(invocation).unwrap();
             done.notified().await;
             Ok(())
         }
@@ -48,9 +48,9 @@ async fn rejected_finish_preserves_other_uncommitted_package() {
         .start_ephemeral(bytes(b"input"))
         .await
         .unwrap();
-    let context = rx.recv().await.unwrap();
+    let app_context = rx.recv().await.unwrap();
     let content = run.session().content_store().await.unwrap();
-    let workspace = context.workspace_store();
+    let workspace = app_context.workspace_store();
     let dir = tempfile::tempdir().unwrap();
     let base_dir = dir.path().join("base");
     std::fs::create_dir(&base_dir).unwrap();
@@ -60,7 +60,7 @@ async fn rejected_finish_preserves_other_uncommitted_package() {
     std::fs::create_dir(&other_dir).unwrap();
     std::fs::write(other_dir.join("shared.txt"), b"pending shared bytes").unwrap();
     let other = workspace.import_directory(&other_dir).await.unwrap();
-    let invocation = context
+    let invocation = app_context
         .begin_invocation_with_content(
             InvocationTrigger::Root {
                 authority: Authority::new([]),
@@ -72,7 +72,7 @@ async fn rejected_finish_preserves_other_uncommitted_package() {
         )
         .await
         .unwrap();
-    let checkout = context
+    let checkout = app_context
         .prepare_workspace(&invocation)
         .await
         .unwrap()

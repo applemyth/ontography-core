@@ -247,6 +247,40 @@ fn receipt(value: &str) -> Result<ReceiptState, ContextError> {
 }
 
 impl SqliteSession {
+    /// Adds every invocation-owned content reference, including interrupted
+    /// invocations and prepared receipts, to the ledger's retention roots.
+    pub(super) fn context_references(
+        &self,
+        payloads: &mut Vec<ContentDigest>,
+        contents: &mut Vec<ontography_content::ContentId>,
+    ) -> Result<(), SqliteStateError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT data FROM context_invocations")?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let data: InvocationData = serde_json::from_slice(&row.get::<_, Vec<u8>>(0)?)
+                .map_err(|error| SqliteStateError::invalid(error.to_string()))?;
+            if let crate::context::BoundTrigger::Root {
+                input,
+                dependencies,
+                ..
+            } = data.trigger
+            {
+                payloads.push(input);
+                contents.extend(dependencies);
+            }
+        }
+        let mut statement = self
+            .connection
+            .prepare("SELECT content_digest FROM context_events WHERE state = 'prepared'")?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            payloads.push(decode_digest(row.get(0)?)?);
+        }
+        Ok(())
+    }
+
     pub(crate) fn verify_context_objects(
         &self,
         objects: &ObjectStore,

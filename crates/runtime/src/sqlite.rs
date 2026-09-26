@@ -288,6 +288,56 @@ impl FrontierView for SqliteView {
 }
 
 impl SqliteSession {
+    pub(super) fn reconcile_objects(&self, objects: &ObjectStore) -> Result<(), SqliteStateError> {
+        let (payloads, contents) = self.content_references()?;
+        objects.reconcile(payloads, contents)?;
+        Ok(())
+    }
+
+    fn content_references(&self) -> Result<(Vec<ContentDigest>, Vec<ContentId>), SqliteStateError> {
+        let mut statement = self.connection.prepare("SELECT result_digest FROM activations UNION SELECT content_digest FROM package_outputs")?;
+        let mut rows = statement.query([])?;
+        let mut payloads = Vec::new();
+        while let Some(row) = rows.next()? {
+            payloads.push(decode_digest(row.get(0)?)?);
+        }
+        let mut statement = self
+            .connection
+            .prepare("SELECT content FROM activation_content")?;
+        let mut rows = statement.query([])?;
+        let mut contents = Vec::new();
+        while let Some(row) = rows.next()? {
+            contents.push(decode_content_id(row.get(0)?)?);
+        }
+        self.context_references(&mut payloads, &mut contents)?;
+        Ok((payloads, contents))
+    }
+
+    /// Resolve an uncertain commit through the authoritative ledger before
+    /// reopening admission. Corruption leaves the durable fault intact.
+    pub(super) fn recover_fault(
+        &mut self,
+        kernel: &Kernel,
+        objects: &ObjectStore,
+    ) -> Result<(), SqliteStateError> {
+        self.snapshot(kernel, objects)?;
+        self.verify_context_objects(objects)?;
+        let (payloads, contents) = self.content_references()?;
+        for digest in payloads.into_iter().collect::<BTreeSet<_>>() {
+            objects.require(digest)?;
+        }
+        objects.verify_content(&contents)?;
+        self.reconcile_objects(objects)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Exclusive)?;
+        transaction.execute(
+            "UPDATE session_meta SET status = 0, fault = NULL WHERE singleton = 1 AND status = 2",
+            [],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
     pub(super) fn create(
         path: &Path,
         kernel: &Kernel,

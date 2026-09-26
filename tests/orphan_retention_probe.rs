@@ -6,7 +6,6 @@ use rusqlite::Connection;
 use std::sync::Arc;
 
 #[tokio::test]
-#[ignore = "known orphan retention after failed SQLite commit"]
 async fn failed_sql_commit_leaves_no_unreferenced_payload_after_gc() {
     let temp = tempfile::tempdir().unwrap();
     let run = temp.path().join("run");
@@ -62,10 +61,7 @@ async fn failed_sql_commit_leaves_no_unreferenced_payload_after_gc() {
 
     let runtime = ProposalRuntime::new(Arc::clone(&kernel));
     let session = runtime.open_persistent(&run).unwrap();
-    assert_eq!(
-        session.content(digest).await.unwrap(),
-        Some(payload.clone())
-    );
+    assert_eq!(session.content(digest).await.unwrap(), None);
     session
         .content_store()
         .await
