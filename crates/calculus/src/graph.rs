@@ -310,7 +310,8 @@ pub struct Schema {
 }
 
 impl Schema {
-    /// Creates a closed schema vocabulary.
+    /// Creates a closed vocabulary for node types, object types, and authority
+    /// tags. Edge types are open semantic annotations, not schema members.
     ///
     /// # Errors
     ///
@@ -467,9 +468,11 @@ type Validator = dyn Fn(&[u8]) -> Result<(), ContractViolation> + Send + Sync + 
 /// must not observe clocks or mutable external state, and must not perform
 /// externally visible effects. The kernel may reuse a successful validation of
 /// the same content commitment under the same admitted contract within one
-/// operation, so validators must not rely on invocation counts. A panic
-/// propagates to the caller; only kernel state, not validator-owned state, is
-/// protected by activation atomicity.
+/// operation, so validators must not rely on invocation counts. Direct
+/// activation and fixed-graph replay propagate a panic; transfer and rewrite
+/// evaluation return `RewriteError::ValidatorPanicked`. Runtime sessions catch
+/// activation panics before publication and report a typed operational error.
+/// Kernel atomicity protects kernel state, not validator-owned state.
 ///
 /// Across reconstruction, the same contract ID and object type must denote the
 /// same accepted payload set.

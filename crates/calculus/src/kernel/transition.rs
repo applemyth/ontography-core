@@ -36,7 +36,7 @@ use super::occurrence::{
 };
 use super::retire::RetireError;
 use super::rewrite::{RewriteError, TransferError};
-use crate::graph::{DefinitionFingerprint, DefinitionId};
+use crate::graph::{Authority, DefinitionFingerprint, DefinitionId};
 
 /// The exact state a transition was evaluated against.
 ///
@@ -198,6 +198,8 @@ pub enum TransitionKind {
         activation: Activation,
         /// One live record per output, keyed by the output's identity.
         outputs: Vec<(PackageId, PackageRecord)>,
+        /// Exact input records whose metadata established the admission proof.
+        inputs: BTreeMap<PackageId, PackageRecord>,
     },
     /// Deliver one live, undelivered package along an admitted edge.
     Transfer {
@@ -205,6 +207,8 @@ pub enum TransitionKind {
         package: PackageId,
         /// The admitted delivery.
         delivery: Delivery,
+        /// Exact outbound record whose type, authority, and payload were proved.
+        source: PackageRecord,
     },
     /// Retire one live package explicitly.
     Retire {
@@ -223,6 +227,8 @@ pub enum TransitionKind {
         fresh_edge_ids: BTreeSet<Arc<str>>,
         /// Every node of the replacement graph, so custody can be checked.
         next_nodes: BTreeSet<Arc<str>>,
+        /// Incoming routes of every `All` receiver in the replacement graph.
+        next_all_routes: BTreeMap<Arc<str>, BTreeSet<Arc<str>>>,
         /// The replacement definition's fingerprint.
         next_fingerprint: DefinitionFingerprint,
     },
@@ -315,13 +321,22 @@ impl Transition {
                 id,
                 activation,
                 outputs,
-            } => verify_activation(kernel, view, *id, activation, outputs),
-            TransitionKind::Transfer { package, delivery } => {
+                inputs,
+            } => verify_activation(kernel, view, *id, activation, outputs, inputs),
+            TransitionKind::Transfer {
+                package,
+                delivery,
+                source,
+            } => {
                 let record = require_live(view, *package)?;
                 if record.delivery.is_some() {
                     return Err(ApplyError::AlreadyDelivered(*package));
                 }
-                verify_incidence(kernel, *package, record.producer_node(), delivery)
+                verify_incidence(kernel, *package, record.producer_node(), delivery)?;
+                if &record != source {
+                    return Err(ApplyError::InputRecordMismatch(*package));
+                }
+                Ok(())
             }
             TransitionKind::Retire {
                 package,
@@ -331,21 +346,7 @@ impl Transition {
                 let record = require_live(view, *package)?;
                 verify_retirement(view, *package, &record, retirement, successor)
             }
-            TransitionKind::Rewrite {
-                retirements,
-                fresh_node_ids,
-                fresh_edge_ids,
-                next_nodes,
-                ..
-            } => verify_rewrite(
-                kernel,
-                view,
-                retirements,
-                fresh_node_ids,
-                fresh_edge_ids,
-                next_nodes,
-                successor,
-            ),
+            TransitionKind::Rewrite { .. } => verify_rewrite(kernel, view, self),
             TransitionKind::Extension { .. } => Ok(()),
         }
     }
@@ -404,6 +405,7 @@ fn verify_activation(
     id: ActivationId,
     activation: &Activation,
     outputs: &[(PackageId, PackageRecord)],
+    inputs: &BTreeMap<PackageId, PackageRecord>,
 ) -> Result<(), ApplyError> {
     if view.activation_known(id) {
         return Err(ApplyError::ActivationExists(id));
@@ -416,6 +418,7 @@ fn verify_activation(
         Trigger::Orig { node_id, .. } => Arc::clone(node_id),
         Trigger::Pkgs { package_ids } => {
             let mut holder: Option<Arc<str>> = None;
+            let mut authority: Option<Authority> = None;
             for package in package_ids {
                 let record = require_live(view, *package)?;
                 let Some(delivery) = &record.delivery else {
@@ -426,10 +429,22 @@ fn verify_activation(
                     Some(current) if *current == delivery.receiver => {}
                     Some(_) => return Err(ApplyError::InputCustody(id)),
                 }
+                if authority.as_ref().is_some_and(|a| a != record.authority()) {
+                    return Err(ApplyError::InputAuthority(id));
+                }
+                authority = Some(record.authority().clone());
             }
             holder.ok_or(ApplyError::InputCustody(id))?
         }
     };
+    if node != activation.node_id {
+        return Err(ApplyError::ExecutionNode(id));
+    }
+    for (package, expected) in inputs {
+        if view.record(*package).as_ref() != Some(expected) {
+            return Err(ApplyError::InputRecordMismatch(*package));
+        }
+    }
     debug_assert_eq!(outputs.len(), activation.outputs.len());
     for (package, record) in outputs {
         let Some(output) = activation.outputs.get(package) else {
@@ -457,12 +472,20 @@ fn verify_activation(
 fn verify_rewrite(
     kernel: &Kernel,
     view: &dyn FrontierView,
-    retirements: &[(PackageId, Retirement)],
-    fresh_node_ids: &BTreeSet<Arc<str>>,
-    fresh_edge_ids: &BTreeSet<Arc<str>>,
-    next_nodes: &BTreeSet<Arc<str>>,
-    successor: u64,
+    transition: &Transition,
 ) -> Result<(), ApplyError> {
+    let TransitionKind::Rewrite {
+        retirements,
+        fresh_node_ids,
+        fresh_edge_ids,
+        next_nodes,
+        next_all_routes,
+        ..
+    } = &transition.kind
+    else {
+        unreachable!("rewrite verification requires a rewrite transition");
+    };
+    let successor = transition.successor_revision();
     let used_node_ids = view.used_node_ids();
     let used_edge_ids = view.used_edge_ids();
     for id in fresh_node_ids {
@@ -487,6 +510,11 @@ fn verify_rewrite(
         let inserted = retired.insert(*package);
         debug_assert!(inserted, "cleanup retires a package once");
         let record = require_live(view, *package)?;
+        if retirement.reason() == RetirementReason::HolderRemoved
+            && next_nodes.contains(record.holder())
+        {
+            return Err(ApplyError::RetirementInconsistent(*package));
+        }
         verify_retirement(view, *package, &record, retirement, successor)?;
     }
     // Every package still live afterwards is held by a node of the next graph (I5).
@@ -494,15 +522,21 @@ fn verify_rewrite(
         if !retired.contains(&package) && !next_nodes.contains(record.holder()) {
             return Err(ApplyError::StrandedHolder(package));
         }
+        if !retired.contains(&package)
+            && let Some(routes) = next_all_routes.get(record.holder())
+            && let Some(delivery) = record.delivery()
+            && !routes.contains(delivery.edge_id())
+        {
+            return Err(ApplyError::ObsoleteReceipt(package));
+        }
     }
     Ok(())
 }
 
 /// A precondition of [`Transition::verify`] failed. The state is unchanged.
 ///
-/// Every variant is reachable by applying an evaluator's transition to a
-/// well-formed state when the evaluator's view was stale or unfaithful, or
-/// when `apply` is given a kernel other than the one that evaluated.
+/// Includes stale or unfaithful view errors, wrong-kernel errors, and
+/// defensive checks on the sealed evaluator output.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum ApplyError {
     /// The transition was evaluated against another definition version than
@@ -527,6 +561,18 @@ pub enum ApplyError {
     /// An activation's inputs are absent or are not all held at one node.
     #[error("activation {0} inputs are not held together at one node")]
     InputCustody(ActivationId),
+    /// Join inputs do not carry one governing authority.
+    #[error("activation {0} inputs carry different authorities")]
+    InputAuthority(ActivationId),
+    /// The node proved during evaluation differs from the true trigger node.
+    #[error("activation {0} execution node differs from its trigger")]
+    ExecutionNode(ActivationId),
+    /// Input metadata differs from the record whose admission was proved.
+    #[error("package {0} differs from its evaluated input record")]
+    InputRecordMismatch(PackageId),
+    /// A surviving live receipt at an `All` node has lost its incoming route.
+    #[error("live receipt {0} names a removed route at an All receiver")]
+    ObsoleteReceipt(PackageId),
     /// The package is not on the frontier.
     #[error("package is not live: {0}")]
     NotLive(PackageId),
@@ -613,11 +659,15 @@ impl State {
     pub fn apply(&mut self, kernel: &Kernel, transition: &Transition) -> Result<(), ApplyError> {
         transition.verify(kernel, self)?;
         let revision = transition.successor_revision();
+        if transition.next_fingerprint().is_some() {
+            self.definition_changes += 1;
+        }
         match &transition.kind {
             TransitionKind::Activation {
                 id,
                 activation,
                 outputs,
+                ..
             } => {
                 for package in activation.inputs().into_iter().flatten() {
                     self.record_mut(*package).status = PackageStatus::Consumed(*id);
@@ -629,7 +679,9 @@ impl State {
                     self.live.insert(*package);
                 }
             }
-            TransitionKind::Transfer { package, delivery } => {
+            TransitionKind::Transfer {
+                package, delivery, ..
+            } => {
                 self.record_mut(*package).delivery = Some(delivery.clone());
             }
             TransitionKind::Retire {

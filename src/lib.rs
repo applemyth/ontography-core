@@ -56,7 +56,7 @@ pub use ontography_calculus::{
     Position, PreparedExtension, PreparedRewrite, PreparedTransfer, Reject, RetireError,
     Retirement, RetirementReason, RewriteError, RewriteFragment, RewriteGrammar, RewriteMatch,
     RewriteProduction, RewriteRequest, RootRule, Schema, State, StateParts, StateRestoreError,
-    TransferError, Transition, TransitionKind, Trigger, TriggerWitness,
+    TransferError, TransferRejection, Transition, TransitionKind, Trigger, TriggerWitness,
 };
 pub use package::{
     PackageDocument, PackageEnvelope, PackageError, PackageLimits, PackageStore, ResolvedEntry,

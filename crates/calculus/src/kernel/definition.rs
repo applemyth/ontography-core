@@ -402,6 +402,7 @@ impl Kernel {
     #[must_use]
     pub fn empty_state(&self) -> State {
         State {
+            definition_changes: 0,
             definition_id: self.id().clone(),
             definition_fingerprint: *self.fingerprint(),
             activations: BTreeMap::new(),

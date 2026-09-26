@@ -356,6 +356,7 @@ impl Output {
 /// One complete accepted activation vertex.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Activation {
+    pub(crate) node_id: Arc<str>,
     pub(crate) trigger: Trigger,
     pub(crate) result: Payload,
     pub(crate) outputs: BTreeMap<PackageId, Output>,
@@ -365,12 +366,24 @@ impl Activation {
     /// Reconstructs an activation record for later validation by
     /// [`crate::Kernel::restore_state`].
     #[must_use]
-    pub fn new(trigger: Trigger, result: Payload, outputs: BTreeMap<PackageId, Output>) -> Self {
+    pub fn new(
+        node_id: impl Into<Arc<str>>,
+        trigger: Trigger,
+        result: Payload,
+        outputs: BTreeMap<PackageId, Output>,
+    ) -> Self {
         Self {
+            node_id: node_id.into(),
             trigger,
             result,
             outputs,
         }
+    }
+
+    /// Returns the node incarnation at which this activation was admitted.
+    #[must_use]
+    pub fn node_id(&self) -> &str {
+        &self.node_id
     }
 
     /// Returns the root or package trigger.
@@ -411,6 +424,7 @@ impl Activation {
 /// mutates a state.
 #[derive(Clone, Debug)]
 pub struct State {
+    pub(crate) definition_changes: u64,
     pub(crate) definition_id: DefinitionId,
     pub(crate) definition_fingerprint: DefinitionFingerprint,
     pub(crate) activations: BTreeMap<ActivationId, Activation>,
@@ -427,6 +441,7 @@ pub struct State {
 impl PartialEq for State {
     fn eq(&self, other: &Self) -> bool {
         self.definition_id == other.definition_id
+            && self.definition_changes == other.definition_changes
             && self.definition_fingerprint == other.definition_fingerprint
             && self.revision == other.revision
             && self.activations == other.activations
@@ -490,6 +505,11 @@ pub(crate) fn fresh_nonce() -> u128 {
 }
 
 impl State {
+    /// Returns the number of accepted rewrites and vocabulary extensions.
+    #[must_use]
+    pub const fn definition_changes(&self) -> u64 {
+        self.definition_changes
+    }
     /// Returns the stable workflow-definition identity.
     #[must_use]
     pub const fn definition_id(&self) -> &DefinitionId {
@@ -540,7 +560,9 @@ impl State {
     }
 
     pub(crate) fn check_fixed_history(&self) -> Result<(), StateRestoreError> {
-        if usize::try_from(self.revision).ok() != Some(self.activations.len()) {
+        if self.definition_changes != 0
+            || usize::try_from(self.revision).ok() != Some(self.activations.len())
+        {
             return Err(StateRestoreError::UnsupportedDynamicState);
         }
         Ok(())

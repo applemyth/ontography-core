@@ -701,6 +701,7 @@ fn accepted_root_node_ids_reuse_static_storage() {
     let first_record = activations.get(&first).expect("first record");
     let external_node_id = Arc::<str>::from("source");
     let forged = Activation::new(
+        "source",
         Trigger::Orig {
             node_id: Arc::clone(&external_node_id),
             authority: Authority::default(),
@@ -1114,6 +1115,7 @@ fn restoration_rejects_empty_and_partial_join_triggers() {
     let fixture = make_join_fixture(IngressMode::All);
     let empty_id = ActivationId::from_u128(301);
     let empty = Activation::new(
+        "review",
         Trigger::Pkgs {
             package_ids: BTreeSet::new(),
         },
@@ -1141,6 +1143,7 @@ fn restoration_rejects_empty_and_partial_join_triggers() {
     );
     let partial_id = ActivationId::from_u128(302);
     let partial = Activation::new(
+        "review",
         Trigger::Pkgs {
             package_ids: BTreeSet::from([*inputs.first().expect("join input")]),
         },
@@ -2091,6 +2094,7 @@ fn restoration_rejects_package_ids_owned_by_another_activation() {
     let other = ActivationId::from_u128(activation_id.as_u128() ^ 1);
     let forged_package_id = PackageId::from_parts(other, package_id.output());
     let forged = Activation::new(
+        record.node_id(),
         record.trigger().clone(),
         Arc::clone(record.result()),
         BTreeMap::from([(forged_package_id, output.clone())]),
@@ -2127,6 +2131,7 @@ fn restoration_rejects_a_trigger_with_a_missing_producer() {
     let child_id = ActivationId::from_u128(102);
     let package_id = PackageId::from_parts(producer_id, 1);
     let child = Activation::new(
+        "review",
         Trigger::Pkgs {
             package_ids: BTreeSet::from([package_id]),
         },
@@ -2156,6 +2161,7 @@ fn restoration_rejects_a_trigger_missing_from_its_existing_producer() {
     let child_id = ActivationId::from_u128(202);
     let package_id = PackageId::from_parts(producer_id, 1);
     let producer = Activation::new(
+        "source",
         Trigger::Orig {
             node_id: Arc::from("source"),
             authority: evidence,
@@ -2164,6 +2170,7 @@ fn restoration_rejects_a_trigger_missing_from_its_existing_producer() {
         BTreeMap::new(),
     );
     let child = Activation::new(
+        "review",
         Trigger::Pkgs {
             package_ids: BTreeSet::from([package_id]),
         },
@@ -2211,6 +2218,7 @@ fn restoration_rejects_invalid_carried_authority() {
         output.content_digest(),
     );
     let forged = Activation::new(
+        record.node_id(),
         record.trigger().clone(),
         Arc::clone(record.result()),
         BTreeMap::from([(*package_id, forged_output)]),
@@ -2251,6 +2259,7 @@ fn restoration_rejects_duplicate_consumers_and_causal_cycles() {
         (
             id,
             Activation::new(
+                "review",
                 Trigger::Pkgs {
                     package_ids: BTreeSet::from([package_id]),
                 },
@@ -2275,6 +2284,7 @@ fn restoration_rejects_duplicate_consumers_and_causal_cycles() {
     let left_package = PackageId::from_parts(left, 1);
     let right_package = PackageId::from_parts(right, 1);
     let left_record = Activation::new(
+        "review",
         Trigger::Pkgs {
             package_ids: BTreeSet::from([right_package]),
         },
@@ -2290,6 +2300,7 @@ fn restoration_rejects_duplicate_consumers_and_causal_cycles() {
         )]),
     );
     let right_record = Activation::new(
+        "review",
         Trigger::Pkgs {
             package_ids: BTreeSet::from([left_package]),
         },
@@ -2338,6 +2349,7 @@ fn restoration_revalidates_package_edge_payloads() {
         digest(b"not-evidence"),
     );
     let forged = Activation::new(
+        record.node_id(),
         record.trigger().clone(),
         Arc::clone(record.result()),
         BTreeMap::from([(*package_id, invalid_output)]),
@@ -2427,6 +2439,7 @@ fn live_and_restored_records_share_the_same_rejection_reason() {
     let activation_id = ActivationId::from_u128(77);
     let package_id = PackageId::from_parts(activation_id, 1);
     let record = Activation::new(
+        "source",
         Trigger::Orig {
             node_id: Arc::from("source"),
             authority: evidence.clone(),

@@ -38,7 +38,7 @@ pub(crate) mod context;
 
 /// Version of the graph store: every table this module owns. The context
 /// store carries its own version; see [`context`] for the compatibility rule.
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 
 /// The columns that decode into one package record, in [`decode_record`] order.
 const RECORD_COLUMNS: &str =
@@ -789,10 +789,10 @@ impl SqliteSession {
         // An exact-state export also proves the derived readiness indexes
         // agree with the rows it exports.
         validate_readiness(&self.connection, kernel)?;
-        let (definition_id, fingerprint, revision, used_nodes, used_edges) =
+        let (definition_id, fingerprint, revision, used_nodes, used_edges, definition_changes) =
             self.connection.query_row(
                 "SELECT definition_id, definition_fingerprint, state_revision,
-                        used_node_ids, used_edge_ids
+                        used_node_ids, used_edge_ids, definition_changes
                  FROM session_meta WHERE singleton = 1",
                 [],
                 |row| {
@@ -802,14 +802,17 @@ impl SqliteSession {
                         row.get::<_, i64>(2)?,
                         row.get::<_, Vec<u8>>(3)?,
                         row.get::<_, Vec<u8>>(4)?,
+                        row.get::<_, i64>(5)?,
                     ))
                 },
             )?;
-        let mut records =
-            BTreeMap::<ActivationId, (Trigger, Payload, BTreeMap<PackageId, Output>)>::new();
+        let mut records = BTreeMap::<
+            ActivationId,
+            (Arc<str>, Trigger, Payload, BTreeMap<PackageId, Output>),
+        >::new();
         let mut cache = BTreeMap::new();
         let mut statement = self.connection.prepare(
-            "SELECT activation_id, trigger_kind, root_node, root_authority, result_digest
+            "SELECT activation_id, trigger_kind, root_node, root_authority, result_digest, execution_node
              FROM activations ORDER BY activation_id",
         )?;
         let mut rows = statement.query([])?;
@@ -828,6 +831,7 @@ impl SqliteSession {
             records.insert(
                 id,
                 (
+                    Arc::from(row.get::<_, String>(5)?),
                     trigger,
                     cached_object(objects, &mut cache, decode_digest(row.get(4)?)?)?,
                     BTreeMap::new(),
@@ -857,12 +861,12 @@ impl SqliteSession {
                     record.content_digest(),
                 ),
             };
-            let (_, _, outputs) = records
+            let (_, _, _, outputs) = records
                 .get_mut(&id.producer())
                 .ok_or_else(|| SqliteStateError::invalid("output producer is absent"))?;
             outputs.insert(id, output);
             if let PackageStatus::Consumed(consumer) = record.status() {
-                let (trigger, _, _) = records
+                let (_, trigger, _, _) = records
                     .get_mut(consumer)
                     .ok_or_else(|| SqliteStateError::invalid("output consumer is absent"))?;
                 let Trigger::Pkgs { package_ids } = trigger else {
@@ -876,10 +880,13 @@ impl SqliteSession {
         }
         let activations = records
             .into_iter()
-            .map(|(id, (trigger, result, outputs))| (id, Activation::new(trigger, result, outputs)))
+            .map(|(id, (node, trigger, result, outputs))| {
+                (id, Activation::new(node, trigger, result, outputs))
+            })
             .collect();
         kernel
             .restore_checkpoint(Checkpoint {
+                definition_changes: decode_u64(definition_changes, "definition changes")?,
                 definition_id: DefinitionId::new(definition_id)
                     .map_err(|error| SqliteStateError::invalid(error.to_string()))?,
                 definition_fingerprint: decode_fingerprint(fingerprint)?,
@@ -1141,6 +1148,7 @@ fn apply_transition(
             id,
             activation,
             outputs,
+            ..
         } => {
             // The activation row first: consumed inputs reference it.
             insert_activation_record(transaction, *id, activation)?;
@@ -1183,7 +1191,9 @@ fn apply_transition(
                 }
             }
         }
-        TransitionKind::Transfer { package, delivery } => {
+        TransitionKind::Transfer {
+            package, delivery, ..
+        } => {
             let changed = transaction.execute(
                 "UPDATE package_outputs SET delivery_edge = ?1, delivery_receiver = ?2
                  WHERE producer_activation = ?3 AND output_id = ?4
@@ -1258,8 +1268,8 @@ fn apply_transition(
         None => current,
     };
     transaction.execute(
-        "UPDATE session_meta SET state_revision = ?1 WHERE singleton = 1",
-        [encode_u64(successor)?],
+        "UPDATE session_meta SET state_revision = ?1, definition_changes = definition_changes + ?2 WHERE singleton = 1",
+        params![encode_u64(successor)?, i64::from(transition.next_fingerprint().is_some())],
     )?;
     let touched_readiness = !changed_groups.is_empty();
     if installed.graph() == current.graph() {
@@ -1289,6 +1299,7 @@ fn touched(transition: &Transition) -> (Vec<PackageId>, Vec<ActivationId>, bool)
             id,
             activation,
             outputs,
+            ..
         } => {
             let mut packages: Vec<PackageId> = outputs.iter().map(|(id, _)| *id).collect();
             packages.extend(activation.inputs().into_iter().flatten().copied());
@@ -1681,13 +1692,14 @@ fn write_current_definition(
     }
     connection.execute(
         "UPDATE session_meta SET definition_fingerprint = ?1, current_graph = ?2,
-             used_node_ids = ?3, used_edge_ids = ?4, state_revision = ?5 WHERE singleton = 1",
+             used_node_ids = ?3, used_edge_ids = ?4, state_revision = ?5, definition_changes = ?6 WHERE singleton = 1",
         params![
             kernel.fingerprint().as_bytes().as_slice(),
             encode_fragment(kernel)?,
             encode_ids(state.used_node_ids())?,
             encode_ids(state.used_edge_ids())?,
-            encode_u64(state.revision())?
+            encode_u64(state.revision())?,
+            encode_u64(state.definition_changes())?,
         ],
     )?;
     Ok(())
@@ -1790,12 +1802,14 @@ fn create_schema(connection: &Connection) -> Result<(), SqliteStateError> {
             used_edge_ids BLOB NOT NULL,
             status INTEGER NOT NULL CHECK(status IN (0, 1, 2)),
             state_revision INTEGER NOT NULL CHECK(state_revision >= 0),
+            definition_changes INTEGER NOT NULL DEFAULT 0 CHECK(definition_changes >= 0),
             fault TEXT,
             CHECK((status = 2 AND fault IS NOT NULL) OR (status IN (0, 1) AND fault IS NULL))
          );
          CREATE TABLE activations (
             activation_id BLOB PRIMARY KEY CHECK(length(activation_id) = 16),
             trigger_kind INTEGER NOT NULL CHECK(trigger_kind IN (0, 1)),
+            execution_node TEXT NOT NULL,
             root_node TEXT,
             root_authority BLOB,
             result_digest BLOB NOT NULL CHECK(length(result_digest) = 32),
@@ -1931,14 +1945,15 @@ fn insert_activation_record(
     let result_digest = ContentDigest::compute(activation.result());
     transaction.execute(
         "INSERT INTO activations (
-            activation_id, trigger_kind, root_node, root_authority, result_digest
-         ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            activation_id, trigger_kind, root_node, root_authority, result_digest, execution_node
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
             activation_id.as_slice(),
             trigger_kind,
             root_node,
             root_authority,
-            result_digest.as_bytes().as_slice()
+            result_digest.as_bytes().as_slice(),
+            activation.node_id(),
         ],
     )?;
     Ok(())

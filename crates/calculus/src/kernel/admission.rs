@@ -19,7 +19,39 @@ use super::occurrence::{
     Activation, ActivationId, Output, PackageId, PackageRecord, PackageStatus, State, StateParts,
     Trigger,
 };
-use super::transition::{PackageView, Transition, TransitionKind};
+use super::transition::{Binding, PackageView, Transition, TransitionKind};
+
+/// Read each input once. The proof and the sealed transition bind the same
+/// records even when an external view changes its answers during evaluation.
+struct InputView {
+    binding: Binding,
+    records: BTreeMap<PackageId, PackageRecord>,
+}
+
+impl InputView {
+    fn capture(view: &dyn PackageView, inputs: Option<&BTreeSet<PackageId>>) -> Self {
+        Self {
+            binding: view.binding(),
+            records: inputs
+                .into_iter()
+                .flatten()
+                .filter_map(|id| view.record(*id).map(|record| (*id, record)))
+                .collect(),
+        }
+    }
+}
+
+impl PackageView for InputView {
+    fn record(&self, package: PackageId) -> Option<PackageRecord> {
+        self.records.get(&package).cloned()
+    }
+    fn activation_known(&self, _: ActivationId) -> bool {
+        false
+    }
+    fn binding(&self) -> Binding {
+        self.binding.clone()
+    }
+}
 
 /// A live, delivered package as seen by a join.
 struct PendingInput {
@@ -238,25 +270,16 @@ impl Kernel {
     where
         I: IntoIterator<Item = PackageId>,
     {
+        let package_ids = package_ids.into_iter().collect::<BTreeSet<_>>();
+        let view = InputView::capture(view, Some(&package_ids));
         let binding = view.binding();
         self.check_binding(&binding)?;
-        let package_ids = package_ids.into_iter().collect::<BTreeSet<_>>();
-        let validated = self.validate_package_inputs(view, &package_ids)?;
-        let packages = package_ids
-            .iter()
-            .map(|package_id| {
-                view.record(*package_id)
-                    .map(|record| (*package_id, record))
-                    .ok_or(Reject::UnknownPackage {
-                        package_id: *package_id,
-                    })
-            })
-            .collect::<Result<_, _>>()?;
+        let validated = self.validate_package_inputs(&view, &package_ids)?;
         Ok(TriggerWitness {
             definition_id: binding.definition_id,
             definition_fingerprint: binding.definition_fingerprint,
             package_ids,
-            packages,
+            packages: view.records,
             node_id: validated.node_id,
             authority: validated.governing_authority,
             ingress_mode: validated.ingress_mode,
@@ -593,9 +616,17 @@ impl Kernel {
         mut payload_for: impl FnMut(PackageId, ContentDigest) -> Result<&'e [u8], StateRestoreError>,
     ) -> Result<Transition, StateRestoreError> {
         let wrap = |reject| StateRestoreError::invalid(activation_id, reject);
+        let view = InputView::capture(view, activation.inputs());
         let (node_id, governing_authority) = self
-            .validate_activation_header(view, activation.trigger(), activation.result())
+            .validate_activation_header(&view, activation.trigger(), activation.result())
             .map_err(wrap)?;
+        if activation.node_id != node_id {
+            return Err(wrap(Reject::ExecutionNodeMismatch {
+                declared: activation.node_id.clone(),
+                actual: node_id,
+            }));
+        }
+        activation.node_id = Arc::clone(&node_id);
         if let Trigger::Orig {
             node_id: trigger_node_id,
             ..
@@ -639,6 +670,7 @@ impl Kernel {
                 id: activation_id,
                 activation,
                 outputs: records,
+                inputs: view.records,
             },
         })
     }
@@ -661,15 +693,16 @@ impl Kernel {
         activation_id: ActivationId,
         proposal: ActivationProposal,
     ) -> Result<Transition, Reject> {
-        let binding = view.binding();
-        self.check_binding(&binding)?;
         let ActivationProposal {
             mut trigger,
             result,
             emissions,
         } = proposal;
+        let view = InputView::capture(view, trigger.inputs());
+        let binding = view.binding();
+        self.check_binding(&binding)?;
         let (node_id, governing_authority) =
-            self.validate_activation_header(view, &trigger, &result)?;
+            self.validate_activation_header(&view, &trigger, &result)?;
         if let Trigger::Orig {
             node_id: trigger_node_id,
             ..
@@ -718,11 +751,13 @@ impl Kernel {
             kind: TransitionKind::Activation {
                 id: activation_id,
                 activation: Activation {
+                    node_id,
                     trigger,
                     result,
                     outputs,
                 },
                 outputs: records,
+                inputs: view.records,
             },
         })
     }

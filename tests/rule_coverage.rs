@@ -434,7 +434,10 @@ fn edge_authority_match_rule_applies_to_emission_and_transfer() {
             "AnyOf rejection demanded bytes"
         ))
         .map(|_| ()),
-        Err(TransferError::Rejected(disjoint))
+        Err(TransferError::Rejected {
+            package: disjoint,
+            reason: ontography::TransferRejection::Authority
+        })
     );
     let partial = outbound(&all, &mut all_state, &["t1"]);
     assert_eq!(
@@ -442,7 +445,10 @@ fn edge_authority_match_rule_applies_to_emission_and_transfer() {
             "AllOf rejection demanded bytes"
         ))
         .map(|_| ()),
-        Err(TransferError::Rejected(partial))
+        Err(TransferError::Rejected {
+            package: partial,
+            reason: ontography::TransferRejection::Authority
+        })
     );
     let complete = outbound(&all, &mut all_state, &["t1", "t2"]);
     let prepared = all
@@ -1034,6 +1040,7 @@ fn replay_rejects_an_output_whose_declared_type_disagrees_with_its_edge() {
     let producer = ActivationId::from_u128(1);
     let package = PackageId::from_parts(producer, 0);
     let activation = Activation::new(
+        "a",
         Trigger::Orig {
             node_id: Arc::from("a"),
             authority: Authority::new([tag.clone()]),

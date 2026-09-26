@@ -619,8 +619,8 @@ fn vocabulary_extension_admits_only_monotone_additions() {
         ExtensionError::Structure
     );
 
-    // A plan prepared against one kernel is re-proved by the committing kernel:
-    // a sibling with a tag the plan lacks rejects it.
+    // A plan prepared against another definition version is stale before
+    // the committing kernel considers its vocabulary.
     let mut other = base_vocabulary.extend();
     other.tags.push("other");
     let sibling = admit("ext", &other, &["a", "b"], &[], IngressMode::Any);
@@ -632,7 +632,7 @@ fn vocabulary_extension_admits_only_monotone_additions() {
         sibling
             .commit_extension(&mut sibling_state, foreign)
             .unwrap_err(),
-        ExtensionError::SchemaNarrowed
+        ExtensionError::Stale
     );
 
     let mut stale_state = base.empty_state();

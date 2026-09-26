@@ -179,6 +179,9 @@ impl Kernel {
         state: &mut State,
         prepared: PreparedExtension,
     ) -> Result<Arc<Self>, ExtensionError> {
+        if state.binding() != *prepared.transition.base() {
+            return Err(ExtensionError::Stale);
+        }
         self.check_binding(&state.binding())?;
         self.evaluate_extension(&prepared.next_kernel)?;
         state.apply(self, &prepared.transition)?;

@@ -42,6 +42,6 @@ pub use kernel::{
     PackageStatus, PackageView, Phase, Position, PreparedExtension, PreparedRewrite,
     PreparedTransfer, Reject, RetireError, Retirement, RetirementReason, RewriteError,
     RewriteFragment, RewriteGrammar, RewriteMatch, RewriteProduction, RewriteRequest, State,
-    StateParts, StateRestoreError, TransferError, Transition, TransitionKind, Trigger,
-    TriggerWitness,
+    StateParts, StateRestoreError, TransferError, TransferRejection, Transition, TransitionKind,
+    Trigger, TriggerWitness,
 };

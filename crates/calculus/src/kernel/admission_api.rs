@@ -377,6 +377,14 @@ pub enum Reject {
     /// A package-triggered activation contains no packages.
     #[error("package-triggered activation requires at least one package")]
     EmptyPackageTrigger,
+    /// A recorded activation names a different node from its trigger.
+    #[error("recorded execution node {declared} differs from trigger node {actual}")]
+    ExecutionNodeMismatch {
+        /// Recorded node incarnation.
+        declared: Arc<str>,
+        /// Node established by the trigger.
+        actual: Arc<str>,
+    },
     /// A package identity does not name the activation that contains it.
     #[error("package {package_id} is not owned by activation {activation_id}")]
     InvalidPackageIdentity {

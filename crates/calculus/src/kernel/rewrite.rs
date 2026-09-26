@@ -7,8 +7,8 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::graph::{
-    AuthorityTransitionRule, ContentDigest, DefinitionError, Edge, EdgeDefinition, Graph,
-    IngressMode, Node, NodeDefinition, Payload, RootRule,
+    AuthorityTransitionRule, ContentDigest, ContractViolation, DefinitionError, Edge,
+    EdgeDefinition, Graph, IngressMode, Node, NodeDefinition, Payload, RootRule,
 };
 
 use super::definition::Kernel;
@@ -160,6 +160,11 @@ impl RewriteProduction {
 }
 
 /// Immutable permitted productions indexed by identity.
+///
+/// This is a trusted authority policy: productions may introduce roots and
+/// authority transitions, including through an empty left side. Construction
+/// checks production shape and identity; use checks annotations against the
+/// current kernel's schema and contracts and admits the replacement graph.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RewriteGrammar {
     productions: BTreeMap<Arc<str>, RewriteProduction>,
@@ -288,6 +293,9 @@ pub enum RewriteError {
     /// An internal/imported state violates the canonical frontier shape.
     #[error("invalid frontier state: {0}")]
     InvalidState(Arc<str>),
+    /// A prepared rewrite came from a different validator registry.
+    #[error("prepared rewrite changes contract {0}")]
+    ContractChanged(Arc<str>),
 }
 
 impl From<ApplyError> for RewriteError {
@@ -315,8 +323,37 @@ pub enum TransferError {
     #[error("edge does not leave the current package holder: {0}")]
     InvalidEdge(Arc<str>),
     /// The edge's type, authority, or payload predicate rejected the package.
-    #[error("edge rejected package {0}")]
-    Rejected(PackageId),
+    #[error("edge rejected package {package}: {reason}")]
+    Rejected {
+        /// Rejected package occurrence.
+        package: PackageId,
+        /// Admission premise the edge did not satisfy.
+        reason: TransferRejection,
+    },
+}
+
+/// Why a selected edge does not accept an otherwise transferable package.
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum TransferRejection {
+    /// The package object type differs from the edge contract's object type.
+    #[error("object type {actual} differs from required {expected}")]
+    ObjectType {
+        /// Contract object type.
+        expected: Arc<str>,
+        /// Package object type.
+        actual: Arc<str>,
+    },
+    /// The carried authority does not satisfy the edge's matching mode.
+    #[error("carried authority does not match the edge")]
+    Authority,
+    /// The exact payload predicate rejected the committed bytes.
+    #[error("contract {contract} rejected payload: {source}")]
+    Contract {
+        /// Admitted contract identity.
+        contract: Arc<str>,
+        /// Predicate's rejection detail.
+        source: ContractViolation,
+    },
 }
 
 fn invalid_production(message: &str) -> RewriteError {
@@ -363,7 +400,9 @@ pub struct PreparedTransfer {
 impl PreparedTransfer {
     fn parts(&self) -> (PackageId, &Delivery) {
         match &self.transition.kind {
-            TransitionKind::Transfer { package, delivery } => (*package, delivery),
+            TransitionKind::Transfer {
+                package, delivery, ..
+            } => (*package, delivery),
             _ => unreachable!("a prepared transfer holds a transfer transition"),
         }
     }
@@ -665,21 +704,30 @@ impl Kernel {
         package_id: PackageId,
         record: &PackageRecord,
         bytes: impl FnOnce() -> Result<Payload, RewriteError>,
-    ) -> Result<bool, RewriteError> {
+    ) -> Result<Result<(), TransferRejection>, RewriteError> {
         let (_, edge, _, contract) = self
             .admitted_edge(edge_id)
             .ok_or_else(|| invalid_state("acceptance edge is absent"))?;
-        if record.object_type() != contract.object_type()
-            || !edge.matches_authority(record.authority())
-        {
-            return Ok(false);
+        if record.object_type() != contract.object_type() {
+            return Ok(Err(TransferRejection::ObjectType {
+                expected: Arc::from(contract.object_type()),
+                actual: Arc::from(record.object_type()),
+            }));
+        }
+        if !edge.matches_authority(record.authority()) {
+            return Ok(Err(TransferRejection::Authority));
         }
         let payload = bytes()?;
         if !record.content_digest().verifies(&payload) {
             return Err(RewriteError::EvidenceMismatch(package_id));
         }
         catch_unwind(AssertUnwindSafe(|| contract.validate(&payload)))
-            .map(|result| result.is_ok())
+            .map(|result| {
+                result.map_err(|source| TransferRejection::Contract {
+                    contract: Arc::from(contract.id()),
+                    source,
+                })
+            })
             .map_err(|_| RewriteError::ValidatorPanicked(Arc::from(contract.id())))
     }
 
@@ -722,6 +770,7 @@ impl Kernel {
             &request.matching,
         )?;
         let changed_sources = changed_outgoing_sources(self.graph(), next.graph());
+        let outgoing = outgoing_by_source(next.graph());
         let live = frontier.live();
         let retired = cleanup(
             live.iter().map(|(id, record)| (*id, record)),
@@ -731,15 +780,19 @@ impl Kernel {
                 if !changed_sources.contains(holder) {
                     return Ok(true);
                 }
-                for edge in next
-                    .graph()
-                    .edges()
-                    .iter()
-                    .filter(|edge| edge.source() == holder)
-                {
-                    if next.accepts_package(edge.id(), package_id, record, || {
-                        payload_for(package_id, record.content_digest())
-                    })? {
+                let mut payload: Option<Payload> = None;
+                for edge in outgoing.get(holder).into_iter().flatten() {
+                    if next
+                        .accepts_package(edge, package_id, record, || {
+                            if let Some(bytes) = &payload {
+                                return Ok(Arc::clone(bytes));
+                            }
+                            let bytes = payload_for(package_id, record.content_digest())?;
+                            payload = Some(Arc::clone(&bytes));
+                            Ok(bytes)
+                        })?
+                        .is_ok()
+                    {
                         return Ok(true);
                     }
                 }
@@ -771,6 +824,17 @@ impl Kernel {
                 fresh_node_ids,
                 fresh_edge_ids,
                 next_nodes: next.graph().nodes().iter().map(Node::id_arc).collect(),
+                next_all_routes: next
+                    .node_definitions()
+                    .iter()
+                    .filter(|node| node.ingress_mode() == IngressMode::All)
+                    .map(|node| {
+                        (
+                            Arc::from(node.node_id()),
+                            next.incoming_edge_ids(node.node_id()).clone(),
+                        )
+                    })
+                    .collect(),
                 next_fingerprint: *next.fingerprint(),
             },
         };
@@ -826,7 +890,22 @@ impl Kernel {
         state: &mut State,
         prepared: PreparedRewrite,
     ) -> Result<Arc<Self>, RewriteError> {
+        if state.binding() != *prepared.transition.base() {
+            return Err(RewriteError::Stale);
+        }
         self.check_binding(&state.binding())?;
+        for contract in self.contracts() {
+            if !prepared
+                .next_kernel
+                .contract(contract.id())
+                .is_some_and(|next| {
+                    next.object_type() == contract.object_type()
+                        && next.shares_validator_with(contract)
+                })
+            {
+                return Err(RewriteError::ContractChanged(Arc::from(contract.id())));
+            }
+        }
         state.apply(self, &prepared.transition)?;
         Ok(prepared.next_kernel)
     }
@@ -896,15 +975,19 @@ impl Kernel {
             .edge(edge_id)
             .filter(|edge| edge.source() == holder)
             .ok_or_else(|| TransferError::InvalidEdge(Arc::from(edge_id)))?;
-        if !self.accepts_package(edge_id, package_id, &record, || {
+        if let Err(reason) = self.accepts_package(edge_id, package_id, &record, || {
             payload_for(package_id, record.content_digest())
         })? {
-            return Err(TransferError::Rejected(package_id));
+            return Err(TransferError::Rejected {
+                package: package_id,
+                reason,
+            });
         }
         Ok(Transition {
             base: binding,
             kind: TransitionKind::Transfer {
                 package: package_id,
+                source: record,
                 delivery: Delivery::new(edge.id(), edge.target()),
             },
         })
@@ -919,6 +1002,9 @@ impl Kernel {
         state: &mut State,
         prepared: PreparedTransfer,
     ) -> Result<Delivery, TransferError> {
+        if state.binding() != *prepared.transition.base() {
+            return Err(RewriteError::Stale.into());
+        }
         self.check_binding(&state.binding())?;
         state
             .apply(self, &prepared.transition)

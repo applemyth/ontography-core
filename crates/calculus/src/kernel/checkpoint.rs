@@ -28,6 +28,8 @@ use super::rewrite::RewriteFragment;
 /// The whole of one state as an adapter stores it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Checkpoint {
+    /// Number of accepted rewrites and vocabulary extensions, including no-ops.
+    pub definition_changes: u64,
     /// The workflow definition the state is bound to.
     pub definition_id: DefinitionId,
     /// The fingerprint of the definition version the state is bound to.
@@ -83,7 +85,7 @@ pub enum CheckpointError {
     /// A retirement disagrees with its package or its evidence (I4).
     #[error("retirement: {0}")]
     Retirement(&'static str),
-    /// The revision is below what the recorded operations require (I6).
+    /// The revision differs from what the recorded operations require (I6).
     #[error("revision: {0}")]
     Revision(&'static str),
     /// The consumption relation is not a rooted DAG.
@@ -96,6 +98,7 @@ impl State {
     #[must_use]
     pub fn checkpoint(&self) -> Checkpoint {
         Checkpoint {
+            definition_changes: self.definition_changes,
             definition_id: self.definition_id.clone(),
             definition_fingerprint: self.definition_fingerprint,
             activations: self.activations.clone(),
@@ -111,7 +114,7 @@ impl Kernel {
     /// Checks a trusted checkpoint's invariants and rebuilds the state.
     ///
     /// This verifies the definition binding, ownership, custody, consumption,
-    /// retirement consistency, identity allocation, revision bounds, causal
+    /// retirement consistency, identity allocation, exact revision accounting, causal
     /// acyclicity, join-authority equality, schema membership of every root
     /// authority, object type, and carried authority, and current-edge
     /// incidence of every delivery. It does not rerun contracts or cleanup.
@@ -121,6 +124,7 @@ impl Kernel {
     /// Returns the first violated invariant.
     pub fn restore_checkpoint(&self, checkpoint: Checkpoint) -> Result<State, CheckpointError> {
         let Checkpoint {
+            definition_changes,
             definition_id,
             definition_fingerprint,
             activations,
@@ -169,7 +173,8 @@ impl Kernel {
 
         let mut explicit_transfers = 0_u64;
         let mut explicit_retirements = 0_u64;
-        let mut structural_retirements = false;
+        let mut structural_revisions = BTreeSet::new();
+        let mut explicit_revisions = BTreeSet::new();
         consumption_order(&activations).map_err(CheckpointError::Cycle)?;
         for (&id, activation) in &activations {
             let node = match &activation.trigger {
@@ -218,6 +223,11 @@ impl Kernel {
                         ))?
                 }
             };
+            if activation.node_id != node {
+                return Err(CheckpointError::Consumption(
+                    "recorded execution node disagrees with trigger",
+                ));
+            }
             if !used_node_ids.contains(&node) {
                 return Err(CheckpointError::Identity(
                     "execution node is absent from lifetime allocations",
@@ -324,26 +334,37 @@ impl Kernel {
                             ));
                         }
                         if retirement.reason() == RetirementReason::Explicit {
+                            if !explicit_revisions.insert(retirement.revision()) {
+                                return Err(CheckpointError::Retirement(
+                                    "explicit retirements share a revision",
+                                ));
+                            }
                             explicit_retirements += 1;
                         } else {
-                            structural_retirements = true;
+                            structural_revisions.insert(retirement.revision());
                         }
                     }
                 }
             }
         }
 
-        // Structural retirements only arise from a rewrite, which is at least one
-        // further revision; without it a fixed-graph export would drop them.
-        let minimum_revision = u64::try_from(activations.len())
+        if !explicit_revisions.is_disjoint(&structural_revisions)
+            || u64::try_from(structural_revisions.len())
+                .map_or(true, |count| count > definition_changes)
+        {
+            return Err(CheckpointError::Revision(
+                "retirement revisions disagree with definition changes",
+            ));
+        }
+        let expected_revision = u64::try_from(activations.len())
             .ok()
             .and_then(|count| count.checked_add(explicit_transfers))
             .and_then(|count| count.checked_add(explicit_retirements))
-            .and_then(|count| count.checked_add(u64::from(structural_retirements)))
+            .and_then(|count| count.checked_add(definition_changes))
             .ok_or(CheckpointError::Revision("revision overflow"))?;
-        if revision < minimum_revision {
+        if revision != expected_revision {
             return Err(CheckpointError::Revision(
-                "state revision predates its accepted activations, transfers, or retirements",
+                "state revision disagrees with its activations, transfers, retirements, or definition changes",
             ));
         }
         let live = packages
@@ -352,6 +373,7 @@ impl Kernel {
             .map(|(id, _)| *id)
             .collect();
         Ok(State {
+            definition_changes,
             definition_id,
             definition_fingerprint,
             activations,
@@ -867,7 +889,7 @@ mod tests {
         assert!(matches!(
             rejects(&|c| {
                 retire(c, received, &|r| r.revision = 1);
-                retire(c, outbound, &|r| r.revision = 1);
+                retire(c, outbound, &|r| r.revision = 2);
                 c.revision = 3;
             }),
             CheckpointError::Revision(_)

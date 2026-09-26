@@ -81,9 +81,20 @@ fn transfer_is_single_and_requires_phase_type_authority_contract_and_commitment(
         Err(Reject::PackageNotDelivered { .. })
     ));
     for edge in ["badtype", "badcap", "deny"] {
-        assert!(
-            matches!(initial.prepare_transfer(&state, package, edge, &payload()), Err(TransferError::Rejected(id)) if id == package)
-        );
+        let Err(TransferError::Rejected {
+            package: id,
+            reason,
+        }) = initial.prepare_transfer(&state, package, edge, &payload())
+        else {
+            panic!("edge must reject")
+        };
+        assert_eq!(id, package);
+        assert!(matches!(
+            (edge, reason),
+            ("badtype", ontography::TransferRejection::ObjectType { .. })
+                | ("badcap", ontography::TransferRejection::Authority)
+                | ("deny", ontography::TransferRejection::Contract { .. })
+        ));
     }
     assert!(matches!(
         initial.prepare_transfer(&state, package, "ok", b"wrong bytes"),
@@ -408,7 +419,7 @@ fn evidence_is_requested_only_after_live_custody_and_edge_metadata_require_it() 
         initial.prepare_transfer_with_evidence(&state, package, "type", |_, _| panic!(
             "type rejection demanded bytes"
         )),
-        Err(TransferError::Rejected(_))
+        Err(TransferError::Rejected { .. })
     ));
     let current = initial.commit_rewrite(&mut state, prepared).unwrap();
     assert!(matches!(
@@ -504,4 +515,72 @@ fn rule_symbols_match_injectively_and_fresh_allocations_are_not_survivor_asserti
         ),
         Err(RewriteError::UnknownProduction(_))
     ));
+}
+
+#[test]
+fn cleanup_fetches_one_payload_per_package_across_candidate_edges() {
+    let initial = kernel(&["A", "B"], &[]);
+    let after = kernel(
+        &["A", "B"],
+        &[
+            ("a-deny", "A", "B", "deny"),
+            ("b-deny", "A", "B", "deny"),
+            ("c-accept", "A", "B", "payload"),
+        ],
+    );
+    let (production, request) = rule("connect", &initial, &after, &["A", "B"], &[]);
+    let grammar = RewriteGrammar::new([production]).unwrap();
+    let mut state = initial.empty_state();
+    let package = outbound(&initial, &mut state, "A");
+    let mut reads = 0;
+    let plan = initial
+        .prepare_rewrite_with_evidence(&state, &grammar, &request, |id, _| {
+            assert_eq!(id, package);
+            reads += 1;
+            Ok(payload())
+        })
+        .unwrap();
+    assert!(plan.retirements().is_empty());
+    assert_eq!(reads, 1);
+}
+
+#[test]
+fn two_real_rewrites_commute_only_with_independent_holder_footprints() {
+    let initial = Arc::new(kernel(&["A", "B", "C", "D"], &[]));
+    let accepting = kernel(&["A", "B", "C", "D"], &[("ab", "A", "B", "payload")]);
+    for (source, independent) in [("C", true), ("A", false)] {
+        let rejecting = kernel(&["A", "B", "C", "D"], &[("reject", source, "D", "deny")]);
+        let (accept, accept_request) =
+            rule("accept", &initial, &accepting, &["A", "B", "C", "D"], &[]);
+        let (reject, reject_request) =
+            rule("reject", &initial, &rejecting, &["A", "B", "C", "D"], &[]);
+        let grammar = RewriteGrammar::new([accept, reject]).unwrap();
+        let mut seed = initial.empty_state();
+        outbound(&initial, &mut seed, "A");
+        outbound(&initial, &mut seed, "C");
+        let run = |order: [&RewriteRequest; 2]| {
+            let mut current = Arc::clone(&initial);
+            let mut state = seed.clone();
+            for request in order {
+                let plan = current
+                    .prepare_rewrite(&state, &grammar, request, &evidence())
+                    .unwrap();
+                current = current.commit_rewrite(&mut state, plan).unwrap();
+            }
+            let retired = state
+                .packages()
+                .iter()
+                .filter_map(|(id, record)| record.retirement().map(|r| (*id, r.reason())))
+                .collect::<BTreeMap<_, _>>();
+            (*current.fingerprint(), state.positions(), retired)
+        };
+        let forward = run([&accept_request, &reject_request]);
+        let backward = run([&reject_request, &accept_request]);
+        assert_eq!(forward.0, backward.0);
+        if independent {
+            assert_eq!(forward, backward);
+        } else {
+            assert_ne!(forward.1, backward.1);
+        }
+    }
 }

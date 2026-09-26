@@ -25,6 +25,6 @@ pub use occurrence::{
 pub use retire::RetireError;
 pub use rewrite::{
     PreparedRewrite, PreparedTransfer, RewriteError, RewriteFragment, RewriteGrammar, RewriteMatch,
-    RewriteProduction, RewriteRequest, TransferError,
+    RewriteProduction, RewriteRequest, TransferError, TransferRejection,
 };
 pub use transition::{ApplyError, Binding, FrontierView, PackageView, Transition, TransitionKind};

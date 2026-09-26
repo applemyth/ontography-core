@@ -2,7 +2,7 @@
 //! view is rejected by `State::apply` against the true state, with the exact
 //! `ApplyError` naming the violated precondition, and the state is unchanged.
 //!
-//! Every variant of `ApplyError` is reached here. Forgeries are views that lie
+//! Forgeries are views that lie
 //! about records, accepted activations, the live frontier, lifetime
 //! identities, or the binding; `DefinitionMismatch` needs no forgery, only a
 //! kernel other than the evaluating one.
@@ -404,9 +404,8 @@ fn activation_forgeries_are_rejected_by_the_true_state() {
             ActivationProposal::join([p, q], bytes(b"result")),
         )
         .unwrap();
-    // Both inputs are truly at `b`; the evaluator believed `c`. Without
-    // outputs the custody is consistent, so the executing node disagrees only
-    // where an output records it.
+    // Both inputs are truly at `b`; the evaluator believed `c`. The recorded
+    // execution node binds that proof even when there are no outputs.
     let mut with_output = ActivationProposal::join([p, q], bytes(b"result"));
     with_output.emit(outbound());
     let mut lie = Forgery::default();
@@ -423,9 +422,14 @@ fn activation_forgeries_are_rejected_by_the_true_state() {
         &kernel,
         &mut state,
         &mismatched,
-        ApplyError::OutputMismatch(PackageId::from_parts(ActivationId::from_u128(3), 0)),
+        ApplyError::ExecutionNode(ActivationId::from_u128(3)),
     );
-    drop(join);
+    rejects(
+        &kernel,
+        &mut state,
+        &join,
+        ApplyError::ExecutionNode(ActivationId::from_u128(2)),
+    );
 
     // InputCustody proper: one input truly at `c`, the other truly at `b`.
     let at_c = PackageId::from_parts(root(&kernel, &mut state, "a", &[delivered("e2")]), 0);
@@ -764,4 +768,347 @@ fn fragment_edge_definitions(fragment: &RewriteFragment) -> Vec<EdgeDefinition> 
 }
 fn fragment_roots(fragment: &RewriteFragment) -> Vec<RootRule> {
     admitted(fragment).roots().to_vec()
+}
+
+fn drop_edges(kernel: &Kernel, removed: &[&str]) -> (RewriteGrammar, RewriteRequest) {
+    let kept: Vec<_> = kernel
+        .graph()
+        .edges()
+        .iter()
+        .map(Edge::id)
+        .filter(|e| !removed.contains(e))
+        .collect();
+    let all: Vec<_> = kernel.graph().edges().iter().map(Edge::id).collect();
+    let node_ids: Vec<_> = kernel.graph().nodes().iter().map(Node::id).collect();
+    let rule = RewriteProduction::new(
+        "drop",
+        fragment(kernel, &node_ids, &all),
+        names(&node_ids),
+        names(&kept),
+        fragment(kernel, &node_ids, &kept),
+    )
+    .unwrap();
+    let req = RewriteRequest::new(
+        "drop",
+        RewriteMatch::new(
+            ids(&node_ids.iter().map(|n| (*n, *n)).collect::<Vec<_>>()),
+            ids(&all.iter().map(|e| (*e, *e)).collect::<Vec<_>>()),
+            ids(&[]),
+            ids(&[]),
+        ),
+    );
+    (RewriteGrammar::new([rule]).unwrap(), req)
+}
+
+#[test]
+fn forged_execution_node_is_rejected_even_without_outputs() {
+    let kernel = kernel();
+    let mut state = kernel.empty_state();
+    let package = PackageId::from_parts(root(&kernel, &mut state, "a", &[delivered("e2")]), 0);
+    assert!(
+        kernel
+            .evaluate_activation(
+                &state,
+                ActivationId::fresh(),
+                ActivationProposal::package(package, bytes(b"result"))
+            )
+            .is_err()
+    );
+    let mut lie = Forgery::default();
+    lie.records
+        .insert(package, Some(record_at(&state, package, "e1", "b")));
+    let transition = kernel
+        .evaluate_activation(
+            &forged(&state, lie),
+            ActivationId::fresh(),
+            ActivationProposal::package(package, bytes(b"result")),
+        )
+        .unwrap();
+    let id = match transition.kind() {
+        ontography::TransitionKind::Activation { id, .. } => *id,
+        _ => unreachable!(),
+    };
+    rejects(
+        &kernel,
+        &mut state,
+        &transition,
+        ApplyError::ExecutionNode(id),
+    );
+}
+
+#[test]
+fn forged_join_authorities_are_rejected() {
+    let base = kernel();
+    let kernel = Kernel::admit(
+        base.id().clone(),
+        Schema::new(
+            ["Node"],
+            ["Result", "Item", "Note"],
+            [tag("route"), tag("extra")],
+        )
+        .unwrap(),
+        base.graph().clone(),
+        base.contracts().iter().cloned(),
+        base.node_definitions().to_vec(),
+        base.edge_definitions().to_vec(),
+        [],
+        [RootRule::new("a", Authority::new([tag("route"), tag("extra")])).unwrap()],
+    )
+    .unwrap();
+    let mut state = kernel.empty_state();
+    let package = PackageId::from_parts(root(&kernel, &mut state, "a", &[delivered("e2")]), 0);
+    let mut proposal = ActivationProposal::root(
+        "a",
+        Authority::new([tag("route"), tag("extra")]),
+        bytes(b"result"),
+    );
+    proposal.emit(delivered("e3"));
+    let other = PackageId::from_parts(kernel.activate(&mut state, proposal).unwrap(), 0);
+    let record = state.package(other).unwrap();
+    let mut lie = Forgery::default();
+    lie.records.insert(
+        other,
+        Some(PackageRecord::new(
+            record.object_type(),
+            Authority::new([tag("route")]),
+            record.content_digest(),
+            record.producer_node(),
+            record.delivery().cloned(),
+            PackageStatus::Live,
+        )),
+    );
+    let transition = kernel
+        .evaluate_activation(
+            &forged(&state, lie),
+            ActivationId::fresh(),
+            ActivationProposal::join([package, other], bytes(b"result")),
+        )
+        .unwrap();
+    let id = match transition.kind() {
+        ontography::TransitionKind::Activation { id, .. } => *id,
+        _ => unreachable!(),
+    };
+    rejects(
+        &kernel,
+        &mut state,
+        &transition,
+        ApplyError::InputAuthority(id),
+    );
+}
+
+#[test]
+fn omitted_all_retirement_is_rejected() {
+    let kernel = kernel();
+    let mut state = kernel.empty_state();
+    let package = PackageId::from_parts(root(&kernel, &mut state, "a", &[delivered("e2")]), 0);
+    let (grammar, req) = drop_edges(&kernel, &["e2"]);
+    let lie = Forgery {
+        live: Some(vec![]),
+        ..Forgery::default()
+    };
+    let (transition, _next) = kernel
+        .evaluate_rewrite(&forged(&state, lie), &grammar, &req, payload())
+        .unwrap();
+    rejects(
+        &kernel,
+        &mut state,
+        &transition,
+        ApplyError::ObsoleteReceipt(package),
+    );
+}
+
+#[test]
+fn surviving_holder_cannot_be_retired_as_removed() {
+    let kernel = kernel();
+    let mut state = kernel.empty_state();
+    let package = PackageId::from_parts(root(&kernel, &mut state, "a", &[outbound()]), 0);
+    let production = RewriteProduction::new(
+        "drop_b",
+        fragment(&kernel, &NODES, &["e1", "e2", "e3", "e4"]),
+        names(&["a", "c"]),
+        names(&["e2", "e3"]),
+        fragment(&kernel, &["a", "c"], &["e2", "e3"]),
+    )
+    .unwrap();
+    let grammar = RewriteGrammar::new([production]).unwrap();
+    let req = RewriteRequest::new(
+        "drop_b",
+        RewriteMatch::new(
+            ids(&[("a", "a"), ("b", "b"), ("c", "c")]),
+            ids(&[("e1", "e1"), ("e2", "e2"), ("e3", "e3"), ("e4", "e4")]),
+            ids(&[]),
+            ids(&[]),
+        ),
+    );
+    let record = state.package(package).unwrap();
+    let fake = PackageRecord::new(
+        record.object_type(),
+        record.authority().clone(),
+        record.content_digest(),
+        "b",
+        None,
+        PackageStatus::Live,
+    );
+    let lie = Forgery {
+        live: Some(vec![(package, fake)]),
+        ..Forgery::default()
+    };
+    let (transition, _next) = kernel
+        .evaluate_rewrite(&forged(&state, lie), &grammar, &req, payload())
+        .unwrap();
+    assert_eq!(
+        transition.retirements()[&package],
+        ontography::RetirementReason::HolderRemoved
+    );
+    rejects(
+        &kernel,
+        &mut state,
+        &transition,
+        ApplyError::RetirementInconsistent(package),
+    );
+}
+
+#[test]
+fn activation_proof_is_bound_to_the_exact_input_record() {
+    let kernel = kernel();
+    let mut state = kernel.empty_state();
+    let package = PackageId::from_parts(root(&kernel, &mut state, "a", &[delivered("e1")]), 0);
+    let record = state.package(package).unwrap();
+    let mut lie = Forgery::default();
+    lie.records.insert(
+        package,
+        Some(PackageRecord::new(
+            record.object_type(),
+            Authority::default(),
+            record.content_digest(),
+            record.producer_node(),
+            record.delivery().cloned(),
+            PackageStatus::Live,
+        )),
+    );
+    let transition = kernel
+        .evaluate_activation(
+            &forged(&state, lie),
+            ActivationId::fresh(),
+            ActivationProposal::package(package, bytes(b"result")),
+        )
+        .unwrap();
+    rejects(
+        &kernel,
+        &mut state,
+        &transition,
+        ApplyError::InputRecordMismatch(package),
+    );
+}
+
+#[test]
+fn transfer_proof_is_bound_to_the_exact_input_record() {
+    let kernel = kernel();
+    let mut state = kernel.empty_state();
+    let package = PackageId::from_parts(root(&kernel, &mut state, "a", &[outbound()]), 0);
+    let record = state.package(package).unwrap();
+    let mut lie = Forgery::default();
+    lie.records.insert(
+        package,
+        Some(PackageRecord::new(
+            record.object_type(),
+            record.authority().clone(),
+            ontography::ContentDigest::compute(b"forged bytes"),
+            record.producer_node(),
+            None,
+            PackageStatus::Live,
+        )),
+    );
+    let transition = kernel
+        .evaluate_transfer(&forged(&state, lie), package, "e1", |_, _| {
+            Ok(bytes(b"forged bytes"))
+        })
+        .unwrap();
+    rejects(
+        &kernel,
+        &mut state,
+        &transition,
+        ApplyError::InputRecordMismatch(package),
+    );
+}
+
+/// A record provider that swaps its answer after the admission read. A
+/// witness must retain the record actually proved, even if a provider changes.
+struct ChangingRecord {
+    binding: Binding,
+    package: PackageId,
+    first: PackageRecord,
+    later: PackageRecord,
+    read: std::cell::Cell<bool>,
+}
+
+impl PackageView for ChangingRecord {
+    fn record(&self, package: PackageId) -> Option<PackageRecord> {
+        if package != self.package {
+            return None;
+        }
+        Some(if self.read.replace(true) {
+            self.later.clone()
+        } else {
+            self.first.clone()
+        })
+    }
+
+    fn activation_known(&self, _: ActivationId) -> bool {
+        false
+    }
+
+    fn binding(&self) -> Binding {
+        self.binding.clone()
+    }
+}
+
+#[test]
+fn changing_view_cannot_substitute_the_records_behind_admission_proofs() {
+    let kernel = kernel();
+    let mut state = kernel.empty_state();
+    let package = PackageId::from_parts(root(&kernel, &mut state, "a", &[delivered("e1")]), 0);
+    let record = state.package(package).unwrap().clone();
+    let changed = PackageRecord::new(
+        record.object_type(),
+        Authority::default(),
+        record.content_digest(),
+        record.producer_node(),
+        record.delivery().cloned(),
+        PackageStatus::Live,
+    );
+
+    let view = ChangingRecord {
+        binding: state.binding(),
+        package,
+        first: record.clone(),
+        later: changed.clone(),
+        read: std::cell::Cell::new(false),
+    };
+    let witness = kernel.prepare_trigger(&view, [package]).unwrap();
+    assert_eq!(witness.authority(), record.authority());
+    assert_eq!(witness.packages()[&package], record);
+
+    // This view first lies about authority, then attempts to replace the
+    // witness with the true record so the sealed transition appears honest.
+    let view = ChangingRecord {
+        binding: state.binding(),
+        package,
+        first: changed,
+        later: record,
+        read: std::cell::Cell::new(false),
+    };
+    let transition = kernel
+        .evaluate_activation(
+            &view,
+            ActivationId::fresh(),
+            ActivationProposal::package(package, bytes(b"result")),
+        )
+        .unwrap();
+    rejects(
+        &kernel,
+        &mut state,
+        &transition,
+        ApplyError::InputRecordMismatch(package),
+    );
 }
