@@ -40,6 +40,7 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
+debug_assert_with_mut_call = "deny"
 needless_pass_by_value = "allow"
 should_implement_trait = "allow"
 struct_field_names = "allow"

@@ -484,7 +484,8 @@ fn verify_rewrite(
     let mut retired = BTreeSet::new();
     for (package, retirement) in retirements {
         debug_assert_ne!(retirement.reason(), RetirementReason::Explicit);
-        debug_assert!(retired.insert(*package), "cleanup retires a package once");
+        let inserted = retired.insert(*package);
+        debug_assert!(inserted, "cleanup retires a package once");
         let record = require_live(view, *package)?;
         verify_retirement(view, *package, &record, retirement, successor)?;
     }
