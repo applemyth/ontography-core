@@ -3,8 +3,8 @@
 use std::path::Path;
 
 use ontography_calculus::{Emission, OutputAuthority};
+use ontography_content::ContentId;
 use ontography_content::package::{PackageEnvelope, ResolvedPackage};
-use ontography_content::{ContentId, ContentStore};
 use ontography_runtime::InvocationHandle;
 use ontography_workspace::{Checkout, WorkspaceError, WorkspaceStore};
 
@@ -16,7 +16,6 @@ use super::ApplicationContext;
 /// advisory: a hostile same-user process requires an operating-system sandbox.
 pub struct PreparedWorkspace {
     store: WorkspaceStore,
-    content: ContentStore,
     checkout: Checkout,
     base: ContentId,
     invocation: InvocationHandle,
@@ -41,29 +40,17 @@ impl PreparedWorkspace {
 
     /// Validate the final directory and return its optional output with retention closure.
     ///
-    /// A capture that is then rejected, by policy or by a failed receipt, is
-    /// released: its fresh imports become collectable, while content that
-    /// committed ledger history retains, such as the base's members, keeps
-    /// its ledger tag.
+    /// New imports have temporary retention until policy and receipt checks
+    /// succeed. Rejection drops only this capture's pins; shared imports and
+    /// committed content retain their existing owners.
     ///
     /// # Errors
     /// Reports capture, policy, and receipt failures. Call only after writers stop.
     pub async fn finish(&self) -> Result<(Option<Emission>, Vec<ContentId>), WorkspaceError> {
-        let package = self.store.capture(self.path(), self.base).await?;
-        match self.publish(&package).await {
-            Ok(finished) => Ok(finished),
-            Err(error) if package.root() == self.base => Err(error),
-            Err(error) => {
-                for id in package.dependencies() {
-                    if let Err(cleanup) = self.content.release(id).await {
-                        return Err(WorkspaceError::Invalid(format!(
-                            "{error}; releasing the capture also failed: {cleanup}"
-                        )));
-                    }
-                }
-                Err(error)
-            }
-        }
+        let capture = self.store.capture_staged(self.path(), self.base).await?;
+        let finished = self.publish(capture.package()).await?;
+        capture.retain().await?;
+        Ok(finished)
     }
 
     async fn publish(
@@ -147,7 +134,6 @@ impl ApplicationContext {
             ));
         }
         let (_, base) = invocation.workspace_package().await.map_err(invalid)?;
-        let content = self.execution.content_store().await.map_err(invalid)?;
         let store = self.workspace_store().clone();
         let parent = store.checkouts_dir().to_owned();
         tokio::fs::create_dir_all(&parent).await?;
@@ -175,7 +161,6 @@ impl ApplicationContext {
         }
         Ok(Some(PreparedWorkspace {
             store,
-            content,
             checkout,
             base: base.root(),
             invocation: invocation.clone(),

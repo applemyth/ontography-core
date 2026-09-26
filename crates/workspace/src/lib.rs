@@ -30,7 +30,7 @@ use ontography_content::content::Hash;
 use ontography_content::package::{
     PackageDocument, PackageError, PackageStore, ResolvedEntryKind, ResolvedPackage, descendants,
 };
-use ontography_content::{ContentError, ContentId, ContentStore};
+use ontography_content::{ContentError, ContentId, ContentStore, StagedImports};
 
 /// A filesystem operation or package validation failure.
 #[derive(Debug, Error)]
@@ -157,6 +157,30 @@ pub struct WorkspaceStore {
     cache: Arc<cache::SharedCache>,
     limits: WorkspaceLimits,
 }
+
+/// A validated capture whose new content is pinned until accepted or dropped.
+pub struct WorkspaceCapture {
+    package: ResolvedPackage,
+    imports: StagedImports,
+}
+
+impl WorkspaceCapture {
+    /// Returns the captured view and its dependency closure.
+    #[must_use]
+    pub const fn package(&self) -> &ResolvedPackage {
+        &self.package
+    }
+
+    /// Retains the successful capture across restarts.
+    ///
+    /// # Errors
+    /// Reports content durability or retention failures.
+    pub async fn retain(self) -> Result<ResolvedPackage> {
+        self.imports.retain().await?;
+        Ok(self.package)
+    }
+}
+
 impl WorkspaceStore {
     /// Use a host-owned root shared by all invocations in a run.
     ///
@@ -203,8 +227,12 @@ impl WorkspaceStore {
     /// # Errors
     /// Reports unsafe paths, concurrent mutation, limits, or storage failures.
     pub async fn import_directory(&self, path: impl AsRef<Path>) -> Result<ResolvedPackage> {
-        let entries = self.capture_entries(path.as_ref(), None).await?;
-        self.store_tree(entries).await
+        let imports = self.content.stage_imports();
+        let store = self.staging_store(&imports);
+        let entries = store.capture_entries(path.as_ref(), None).await?;
+        let package = store.store_tree(entries).await?;
+        imports.retain().await?;
+        Ok(package)
     }
     /// Capture edits as one Changes package relative to the explicit base.
     ///
@@ -220,9 +248,36 @@ impl WorkspaceStore {
         path: impl AsRef<Path>,
         base: ContentId,
     ) -> Result<ResolvedPackage> {
+        self.capture_staged(path, base).await?.retain().await
+    }
+
+    /// Validates a capture under temporary retention for a later policy decision.
+    /// Dropping it releases only its own pins, including on failure or cancellation.
+    ///
+    /// # Errors
+    /// Reports the same validation and storage errors as [`Self::capture`].
+    pub async fn capture_staged(
+        &self,
+        path: impl AsRef<Path>,
+        base: ContentId,
+    ) -> Result<WorkspaceCapture> {
         let base = self.open(base).await?;
-        let entries = self.capture_entries(path.as_ref(), Some(&base)).await?;
-        self.store_changes(&base, entries).await
+        let imports = self.content.stage_imports();
+        imports.protect(&base.dependencies()).await?;
+        let store = self.staging_store(&imports);
+        let entries = store.capture_entries(path.as_ref(), Some(&base)).await?;
+        let package = store.store_changes(&base, entries).await?;
+        Ok(WorkspaceCapture { package, imports })
+    }
+
+    fn staging_store(&self, imports: &StagedImports) -> Self {
+        let content = imports.store();
+        Self {
+            packages: PackageStore::new(content.clone()),
+            content,
+            cache: Arc::clone(&self.cache),
+            limits: self.limits,
+        }
     }
     async fn capture_entries(
         &self,

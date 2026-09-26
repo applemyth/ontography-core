@@ -12,7 +12,9 @@ pub mod content;
 pub mod durability;
 pub mod package;
 
-pub use content::{ContentError, ContentId, ContentMetadata, ContentReader, ContentStore};
+pub use content::{
+    ContentError, ContentId, ContentMetadata, ContentReader, ContentStore, StagedImports,
+};
 pub use package::{
     PackageDocument, PackageEnvelope, PackageError, PackageLimits, PackageStore, ResolvedEntry,
     ResolvedEntryKind, ResolvedPackage,

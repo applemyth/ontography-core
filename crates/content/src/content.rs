@@ -108,6 +108,8 @@ type Result<T> = std::result::Result<T, ContentError>;
 /// pins this spelling to `compute`.
 pub(crate) const PAYLOAD_DOMAIN: &[u8] = b"ontography-payload/v1\0";
 
+type ImportPins = Arc<tokio::sync::Mutex<Vec<(ContentId, TempTag)>>>;
+
 /// Cloneable access to the session's iroh store, without holding a session lock.
 #[derive(Clone)]
 pub struct ContentStore {
@@ -116,6 +118,63 @@ pub struct ContentStore {
     pub(super) _owner: Arc<dyn Send + Sync>,
     pub(super) gate: Arc<tokio::sync::Mutex<()>>,
     pub(super) runtime: tokio::runtime::Handle,
+    imports: Option<ImportPins>,
+}
+
+/// Imports pinned only for the lifetime of this batch and its store handles.
+///
+/// Dropping an unretained batch makes its new bytes collectable without
+/// touching another caller's artifact or ledger tags. Successful callers
+/// explicitly retain the batch after validation and policy checks.
+pub struct StagedImports {
+    content: ContentStore,
+    pins: ImportPins,
+}
+
+impl StagedImports {
+    /// Returns a store whose imports belong to this batch.
+    #[must_use]
+    pub fn store(&self) -> ContentStore {
+        self.content.clone()
+    }
+
+    /// Pins existing dependencies for the batch's lifetime. Retaining the
+    /// batch also retains these dependencies as artifacts.
+    ///
+    /// # Errors
+    /// Reports missing or invalid content and storage failures.
+    pub async fn protect(&self, ids: &[ContentId]) -> Result<()> {
+        let pins = self.content.protect_content(ids).await?;
+        self.pins.lock().await.extend(ids.iter().copied().zip(pins));
+        Ok(())
+    }
+
+    /// Durably retains this batch's imports as ordinary artifacts.
+    ///
+    /// # Errors
+    /// Reports verification, durability, or tag publication failures.
+    pub async fn retain(self) -> Result<()> {
+        let pins = self.pins;
+        self.content
+            .detached(move |store| async move {
+                let _guard = store.gate.lock().await;
+                let imports = pins.lock().await;
+                for (id, _) in imports.iter() {
+                    store.fence(*id).await?;
+                    store
+                        .native
+                        .tags()
+                        .set(
+                            tags::artifact(id.hash, id.format),
+                            HashAndFormat::new(id.hash, id.format),
+                        )
+                        .await
+                        .map_err(backend_error)?;
+                }
+                store.native.sync_db().await.map_err(backend_error)
+            })
+            .await
+    }
 }
 
 impl std::fmt::Debug for ContentStore {
@@ -147,7 +206,18 @@ impl ContentStore {
             _owner: owner,
             gate,
             runtime,
+            imports: None,
         }
+    }
+
+    /// Starts an isolated import batch. Imports remain pinned until its
+    /// handles are dropped, and become durable artifacts only on `retain`.
+    #[must_use]
+    pub fn stage_imports(&self) -> StagedImports {
+        let mut content = self.clone();
+        let pins = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        content.imports = Some(Arc::clone(&pins));
+        StagedImports { content, pins }
     }
 
     /// Run one operation on an owned handle, independently of the caller's
@@ -589,6 +659,16 @@ impl ContentStore {
 
     pub(super) async fn finish_import(&self, value: HashAndFormat) -> Result<ContentId> {
         let id = self.verify_complete(value).await?;
+        if let Some(imports) = &self.imports {
+            let pin = self
+                .native
+                .tags()
+                .temp_tag(value)
+                .await
+                .map_err(backend_error)?;
+            imports.lock().await.push((id, pin));
+            return Ok(id);
+        }
         self.fence(id).await?;
         self.native
             .tags()
