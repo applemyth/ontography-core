@@ -236,6 +236,7 @@ impl PackageStore {
 
     /// Store a canonical document. This imports its own metadata, without
     /// creating a workflow activation or changing referenced packages.
+    /// IDs commit to the exact serialized bytes, not JSON semantic equivalence.
     ///
     /// # Errors
     /// Returns invalid-document, metadata-limit, or content-storage errors.
@@ -249,6 +250,9 @@ impl PackageStore {
     }
 
     /// Read and validate one document without granting or resolving its children.
+    /// Valid alternate JSON encodings are accepted; re-storing the returned
+    /// document uses this implementation's canonical serialization and may
+    /// therefore return a different content ID.
     ///
     /// # Errors
     /// Returns invalid-document, metadata-limit, or verified-content errors.

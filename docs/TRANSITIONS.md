@@ -52,7 +52,9 @@ Every reachable state satisfies:
 
 - **I1 Ownership.** `producer(p) ∈ A` and `p ∈ dom(O_producer(p))`.
 - **I2 Consumption.** `status(p) = Consumed(a)` implies `p ∈ inputs(a)`,
-  `delivery(p)` is `Some`, and `a ∈ A`.
+  `delivery(p)` is `Some`, and `a ∈ A`. All inputs of `a` carry one authority
+  and have the holder recorded as `a.node_id`. A root's recorded node equals
+  its trigger node.
 - **I3 Delivery.** `delivery(p) = Some(e, v)` implies `e` was an admitted edge
   with `s(e) = producer_node(p)` and `t(e) = v` at the revision of delivery.
   If the producing activation's output for `p` names an edge `e`, then
@@ -60,15 +62,19 @@ Every reachable state satisfies:
 - **I4 Retirement.** `status(p) = Retired(r)` implies: `reason = NoAcceptingEdge`
   only if `phase(p) = Out`; `reason = RouteRemoved` only if `phase(p) = In`;
   `evidence` is `Some` only if `reason = Explicit`; `evidence = Some(a)` implies
-  `a ∈ A`; `1 ≤ r.revision ≤ revision(S)`.
+  `a ∈ A`; `1 ≤ r.revision ≤ revision(S)`. `HolderRemoved` implies the holder
+  is absent from the current graph. Explicit retirements have distinct stamps,
+  disjoint from structural retirement stamps.
 - **I5 Custody.** `status(p) = Live` implies `holder(p) ∈ V` in the current
-  graph.
-- **I6 Revision.** `revision(S) ≥ |A| + |{p : delivery(p) is Some and the
+  graph. A live `In` receipt at an `All` holder names a current incoming edge.
+- **I6 Revision.** `revision(S) = |A| + |{p : delivery(p) is Some and the
   producer's output for p names no edge}| + |{p : reason(p) = Explicit}| +
-  [∃p : reason(p) ∈ {HolderRemoved, NoAcceptingEdge, RouteRemoved}]`. Every
-  transition advances the revision by exactly one, and each kind accounts for
+  definition_changes`. Every transition advances the revision by exactly one,
+  and each kind accounts for
   exactly one term: an activation, a transfer, an explicit retirement, or a
-  rewrite (which carries every structural retirement of that revision).
+  definition change. `definition_changes` counts all rewrites and extensions,
+  including identity rewrites. The number of distinct structural retirement
+  stamps cannot exceed this count.
 - **I7 Identity.** `used_node_ids ⊇ V` and `used_edge_ids ⊇ E`, and no fresh
   identity ever re-enters either set.
 
@@ -81,6 +87,7 @@ State = (
   packages:    P → PackageRecord,
   live:        BTreeSet<PackageId>,       derived index of F, maintained by apply
   used_node_ids, used_edge_ids,
+  definition_changes: u64,
   revision: u64,
   nonce: u128,                            fresh on every apply
 )
@@ -97,6 +104,10 @@ exclusively fence on revision alone and report a constant nonce.
 on demand from the records; only `live` is a stored index, and restoration
 rebuilds it.
 
+Every activation records `(node_id, trigger, result, outputs)`, including an
+outputless package-triggered activation. The execution node is part of the
+accepted fact, checked against input custody during apply and restoration.
+
 ## 3. Transitions
 
 A transition is a base binding plus exactly one kind:
@@ -105,13 +116,15 @@ A transition is a base binding plus exactly one kind:
 Transition = (base: (definition_id, definition_fingerprint, revision, nonce), kind)
 
 TransitionKind =
-  | Activation { id, activation, outputs: [(p, PackageRecord)] }
+  | Activation { id, activation, outputs: [(p, PackageRecord)],
+                 inputs: {p → PackageRecord} }
         inserts the activation and its outputs live; consumes the inputs
         named by the activation's trigger
-  | Transfer   { package, delivery }            Live, delivery None → delivery Some
+  | Transfer   { package, delivery, source: PackageRecord }
+        Live, delivery None → delivery Some
   | Retire     { package, retirement }          Live → Retired, reason Explicit
   | Rewrite    { retirements: [(p, Retirement)], fresh_node_ids, fresh_edge_ids,
-                 next_nodes, next_fingerprint }
+                 next_nodes, next_all_routes, next_fingerprint }
         Live → Retired for each, structural reasons only; admits the fresh
         identities; installs the replacement definition
   | Extension  { next_fingerprint }             installs the extended definition
@@ -125,26 +138,29 @@ Multiplicity is therefore not something an evaluator can get wrong.
 
 1. `τ.base` names the applying kernel's definition and version, and equals
    the view's binding.
-2. The kind's preconditions, which are exactly the invariants I1 through I7
-   restricted to what the transition touches:
+2. The kind's preconditions, including I1 through I7 restricted to what the
+   transition touches and the record witnesses used for admission:
    - *Activation*: the identity is fresh; the consumed inputs are all live,
-     delivered, and held at one node, which is the executing node (I2); each
+     delivered, carry equal authority, and are held at the recorded executing
+     node (I2); each input exactly matches its evaluated record witness; each
      output record is owned by the activation, live, and agrees with the
      output on type, authority, digest, producer node, and birth edge; a birth
      delivery names an admitted edge from the executing node to its receiver
      (I1, I3).
-   - *Transfer*: the package is live and undelivered; the delivery names an
+   - *Transfer*: the package is live, undelivered, and exactly matches the
+     source record whose admission was proved; the delivery names an
      admitted edge from the record's producer node to the receiver (I3).
    - *Retire*: the package is live; the retirement admits the package's
      phase; if present, its evidence is an accepted activation (I4).
    - *Rewrite*: every fresh identity is non-empty and unused (I7); every
-     retired package is live and its retirement admits its phase (I4); every
+     retired package is live and its retirement admits its phase (I4);
+     `HolderRemoved` names a holder absent from `next_nodes`; every
      package still live afterwards is held by a node of the replacement graph
-     (I5).
+     and every surviving `All` receipt keeps a current incoming route (I5).
    - *Extension*: nothing beyond the binding.
 
-Every evaluator begins by checking the view's binding against its kernel and
-the revision's headroom, so a transition never carries a base that names
+Every evaluator checks the view's binding against its kernel and the revision's
+headroom before constructing a transition, so its base never names
 another definition or an exhausted revision. Facts an evaluator establishes by
 construction of the sealed transition, namely one record per output, the
 successor revision on every retirement stamp, the reason each kind admits, the
@@ -152,15 +168,19 @@ replacement graph's node set, and the executing node's presence in the
 graph, are asserted in debug builds and are not part of `ApplyError`.
 
 `apply(S, kernel, τ)` runs `verify` against `S` itself, then mutates: performs
-the kind, sets `definition_fingerprint` for a rewrite or extension, sets
-`revision := revision + 1`, and refreshes the nonce.
+the kind, sets `definition_fingerprint` and increments `definition_changes`
+for a rewrite or extension, sets `revision := revision + 1`, and refreshes the
+nonce.
 
-`verify` contains no admission law. Whether a transition is *lawful*, that is
+`verify` does not rerun payload validators. Whether a transition is *lawful*, that is
 whether an evaluator would have produced it from the true state, is decided by
 the evaluators. Whether its result is *well-formed* is decided by `verify`,
 for any view, faithful or not. Every rule of the calculus lives in the
-evaluators, which are pure functions from a view and a request to a
-transition:
+evaluators. Activation evaluation snapshots each input once; its admission
+proof and sealed transition use those same records. Verification binds that
+proof to the records actually being mutated, covering ingress, result-contract,
+and authority decisions even for outputless activations. Evaluators are pure
+functions from a view and a request to a transition:
 
 | Evaluator | Reads | Produces |
 | --- | --- | --- |
@@ -176,6 +196,12 @@ and extension keep a prepare/commit pair so the caller can review the
 transition before committing; the prepared value holds the transition, plus
 the next kernel for a rewrite or extension and the delivery for a transfer,
 never a copy of the state.
+
+Every direct commit checks the prepared base against the current state before
+checking admission, so intervening rewrites and extensions report `Stale`.
+Rewrite and extension commits also require the existing contract validators to
+be shared with the prepared next kernel; a structural fingerprint cannot
+identify executable validator code.
 
 ## 4. Views
 
@@ -201,30 +227,34 @@ The in-memory `State` implements both views and `apply`. The SQLite adapter
 implements both views over rows, runs the same `verify` over the rows of the
 applying transaction, and then writes the kind's facts with a changed-row
 guard per write. The two appliers therefore reject exactly the same
-transitions. `ApplyError` names every precondition a well-formed state can
-fail, and every variant is reachable from a stale or unfaithful view or a
-wrong kernel: definition mismatch, binding mismatch, activation identity
-already present, package identity unknown, output record inconsistent with
-its activation, delivery not matching an admitted edge, inputs not held
-together at one node, not live, not delivered, already delivered, retirement
-inconsistent with the package's phase or evidence, unknown evidence, identity
-reused, package stranded at a removed node.
+transitions. `ApplyError` distinguishes stale bindings, record-witness
+mismatches, authority or execution-node mismatches, invalid custody and
+retirements, obsolete `All` routes, and defensive checks on evaluator outputs.
 
 Views are trusted for liveness, not for integrity. A forged view can make an
 evaluator produce a lawful-looking transition that differs from what the true
-state would have produced, for example one that omits a retirement cleanup
-would have made; it cannot make `apply` produce an ill-formed state, because
-`verify` runs against the state being mutated.
+state would have produced, for example one that omits a `NoAcceptingEdge`
+retirement. It cannot bypass input admission by changing the records used for
+the proof, leave a live package at a removed holder or obsolete `All` route,
+or stamp `HolderRemoved` on a surviving holder. `verify` runs against the
+state being mutated; it enforces structural integrity without replaying
+payload-dependent cleanup. Adapters must use the same trusted validator
+registry for evaluation and verification.
 
-`FrontierView::live` is the only thing rewrite preparation iterates. Its cost
-is `O(|F|)`; activation history and result payloads are never read to prepare
-a rewrite. An adapter fencing on revision alone reports a constant nonce and
+Rewrite preparation reads the frontier, graph and rule structure, and lifetime
+identity sets. The frontier scan costs `O(|F|)`, but constructing and re-admitting
+the replacement definition also traverses the full graph. Outgoing edges are
+indexed once; each rechecked package tests only its holder's candidate edges
+and fetches its payload at most once. Hashing and validator costs depend on
+payload sizes and the candidates attempted. There is no `O(|F|)` bound on the
+whole operation; activation history and result payloads are not read. An
+adapter fencing on revision alone reports a constant nonce and
 the kernel accepts it as such only through the adapter's own applier.
 
 Checkpoint restoration takes `(definition_id, definition_fingerprint, A, P,
-used_node_ids, used_edge_ids, revision)`, requires the definition binding to
-name the restoring kernel, and verifies I1 through I7 and causal acyclicity,
-plus consequences of admission and cleanup that a trusted store cannot
+used_node_ids, used_edge_ids, definition_changes, revision)`, requires the
+definition binding to name the restoring kernel, and verifies I1 through I7 and
+causal acyclicity, plus consequences of admission and cleanup that a trusted store cannot
 legitimately violate: the inputs of a join carry one authority, every root
 authority, object type, and carried authority is in the schema, every
 delivery on a current edge matches that edge's incidence, a holder-removed
@@ -233,7 +263,10 @@ receiver always names a current incoming edge. Its error names the invariant
 family that failed. It does not rerun contracts or cleanup; it is a
 trusted-store integrity check, not a proof of reachability. Fixed-graph
 restoration (`restore_state`) replays every rule from the activation records
-alone and is defined exactly when `revision = |A|`.
+alone. Export through `to_parts` is available only when there have been no
+definition changes, transfers, or retirements; exact revision accounting then
+gives `revision = |A|`. Checkpoint counters describe recorded operations; they
+do not independently authenticate an omitted or altered history.
 
 ## 5. Theorems pinned by tests
 
@@ -250,8 +283,21 @@ alone and is defined exactly when `revision = |A|`.
   rewrites and extensions, that compares the adapter snapshot, every rejection,
   and the readiness projection of every receiver and edge with the in-memory
   state after every step.
-- **T4 Locality.** Rewrites with disjoint footprints commute on graph, live
-  frontier, and retirement records projected without revision stamps.
+- **T4 Locality.** Rewrites commute on graph, live frontier, and retirement
+  records projected without revision stamps when both conditions hold:
+  (1) their graph edits are independent, both residual matches remain valid,
+  fresh allocations are distinct, and both orders yield the same admitted
+  definition; (2) their affected-holder sets are disjoint. For a rewrite
+  `G → G'`, this set is the deleted node IDs, surviving sources whose outgoing
+  edge identity sets change, and surviving `All` receivers whose incoming edge
+  identity sets change. Admitted rewrites preserve the annotations and incidence
+  of retained edge identities. Compute each rewrite's affected-holder set as
+  the union for its initial and residual applications, then require those two
+  unions to be disjoint.
+  Payload evidence is immutable and validators are pure in both orders.
+  Graph independence alone does not suffice: adding two distinct edges from
+  the same holder can retire an `Out` package in only one order. The regression
+  pairs two real rewrites and also pins this overlapping-holder counterexample.
 - **T5 Restoration.** Fixed-graph replay of `to_parts(S)` reproduces `S`
   whenever `revision(S) = |A|`, and checkpoint restoration of any reachable
   state reproduces it exactly.

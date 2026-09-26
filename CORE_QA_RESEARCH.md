@@ -5,6 +5,14 @@ snapshot at `87e9600`. It separates **observed behavior**, **source-derived
 limits**, and **unexecuted hypotheses**. It does not treat passing examples as a
 proof that every reachable state is correct.
 
+The tables below record the pre-fix audit baseline. The subsequent
+[audit changes](docs/AUDIT_FIXES.md) fix the release-only retirement failure,
+capture and SQL retention leaks, persistent fault recovery, and forged-view
+integrity gaps. They also add regression tests beyond these historical counts.
+The current transition specification is [local](docs/TRANSITIONS.md); the
+[local frontier rewrite guide](docs/FRONTIER_REWRITING.md) supersedes the sibling
+guide for this checkout.
+
 ## Evidence and scope
 
 The extracted commit has 33 tracked files and originally had no `Cargo.toml`,
@@ -14,7 +22,7 @@ study. The initial temporary Cargo harness used the sibling `ontography-app`
 dependency manifest and its vendored `iroh-blobs`, while compiling this
 snapshot's `src/lib.rs`. Build output stayed in `/tmp`.
 
-| Test binary (`cargo test --offline --workspace`, 26 September 2026) | Result | Qualification |
+| Pre-fix test binary (`cargo test --offline --workspace`, 26 September 2026) | Historical result | Qualification |
 | --- | --- | --- |
 | In-source unit tests: calculus 9, content 8, runtime 23, workspace 1 | 41 passed | Exhaustive cleanup worlds, fragment-encoding golden bytes, object-store retention and release, session fault classification, corrupt-evidence and context-store fault rules, the canonical retry commitment. |
 | [Ported calculus suite](tests/calculus.rs) | 52 passed, 1 ignored | The ignored wide fan-out restoration probe is a scalability run meant for release mode. |
@@ -28,10 +36,12 @@ snapshot's `src/lib.rs`. Build output stayed in `/tmp`.
 | [Content-composition probe](tests/content_composition_probe.rs) | 1 passed | Workspace capture reuses an unchanged file, emits a small package envelope, and commits the declared content closure. |
 | [Frontier operation probes](tests/frontier_operations.rs) | 4 passed | Explicit retirement, `All` route removal, disjoint-rewrite commutativity, vocabulary extension. |
 | [Persistent frontier probe](tests/persistent_frontier.rs) | 1 passed | Retirement records and an extension survive reopen with an exact snapshot. |
-| [Desired orphan-reclamation regression](tests/orphan_retention_probe.rs) | 1 ignored | It asserts reclamation and currently fails if enabled. |
+| [Desired orphan-reclamation regression](tests/orphan_retention_probe.rs) | 1 ignored | It asserted reclamation and failed when enabled at this baseline. It now runs in the ordinary suite. |
 
-The workspace total is 150 passed, 0 failed, 2 ignored; `cargo fmt --check`,
-strict all-target Clippy, and `cargo doc` also pass. The earlier harness
+The pre-fix debug workspace total was 150 passed, 0 failed, 2 ignored;
+`cargo fmt --check`, strict all-target Clippy, and `cargo doc` also passed at
+that baseline. These results did not establish release-profile correctness.
+The earlier harness
 counts (50 native passes, 107 temporary-harness passes) are superseded and
 must not be added to this total. The sibling source has diverged, notably in
 session triggers and later runtime features. Its [mathematical definition](../ontography-app/MATHEMATICAL_DEFINITION.md)
@@ -169,13 +179,14 @@ entry returns `RootAuthorityOutsideSchema`. This prevents a builder-authored
 application from reserving an unused tag for future rewrites through its current
 API.
 
-**O6 — A failed SQL commit can leave unreferenced content retained by ordinary garbage collection.**
+**O6 — A failed SQL commit could leave unreferenced content retained by ordinary garbage collection (fixed after this baseline).**
 In an isolated persistent run, a SQL trigger rejected the mutation revision
 update after an activation's result bytes had been written. SQLite contained no
 activation afterward. Reopening the run showed the payload was still readable;
 `ContentStore::collect_garbage()` left it readable. The diagnostic passed on
-this snapshot. The retained regression test asserts the desired absence after
-collection and is ignored until reclamation is fixed. The relevant order is
+the audited snapshot. The regression now runs without `ignore`; reconciliation
+after a fault and on reopening removes ledger tags absent from committed graph
+and invocation references, preserving ordinary import ownership. The relevant order is
 `objects.put_all` before `transaction.commit` in
 [SQLite submission](crates/runtime/src/sqlite.rs), persistent named tags in
 [object storage](crates/runtime/src/object_store/iroh.rs), and garbage collection
@@ -217,21 +228,22 @@ package also retains its historical base dependencies.
 
 ## Source-derived limits and held-out probes
 
-Each row is a falsifiable hypothesis or an exposed design boundary; H2, H5,
-H6, H9, and one part of H11 have executed probes, while the others remain
-unexecuted here.
+Each row is a falsifiable hypothesis or an exposed design boundary. Rows marked
+observed or resolved have executed probes; the other rows remain proposed
+experiments or partially checked claims. Current fixes are called out where
+they changed a baseline result.
 `P0` means correctness, safety, or irreversible work
 fate; `P1` means public expressiveness or recovery; `P2` means performance and
 capacity. Source locations are starting points for the test.
 
 | ID | Priority | Claim to challenge and discriminating experiment | Oracle |
 | --- | --- | --- | --- |
-| H1 | P0 | Rewrite-order independence: remove the sole accepting edge, then add a replacement; reverse the order. | **Observed:** rewrites with disjoint footprints commute on graph, frontier, and retirements (`disjoint_rewrites_commute_on_the_frontier`); overlapping rewrites remain order dependent by design. |
+| H1 | P0 | Rewrite-order independence: remove the sole accepting edge, then add a replacement; reverse the order. | **Observed after the baseline:** `two_real_rewrites_commute_only_with_independent_holder_footprints` exercises two real edge additions with disjoint holders and an overlapping-holder counterexample. T4 states the sufficient footprint condition; the earlier identity-rewrite pairing alone did not establish it. |
 | H2 | P0 | **Observed:** transfer on `e1` before deleting it versus delete first. | First trace retains an `In` receipt at the surviving receiver; second retires `Out` work and later transfer rejects. |
 | H3 | P0 | Cross-root merge: fork from separate roots, then join at `All`; vary authority, edge identity, and arrival order. | Equal carried authority and one package per current incoming edge; no double consumption; DAG ancestry includes both roots. |
 | H4 | P0 | Root bypass of approval: give an `All` node a root rule and no received approvals. | Legal root activation has zero inputs. Application policy must prevent treating `All` alone as approval authorization. |
 | H5 | P0 | **Observed:** executable B sends a valid root for A through raw `ApplicationContext::submit`, then tries the node-bound invocation path. | Raw kernel-law admission accepted; node-bound invocation denied root authority for B. Document the distinct trust contracts. |
-| H6 | P0 | **Partly observed:** a SQL failure after object-store tag sync leaves an orphan after garbage collection. Repeat with a process kill in the same window and repeated failures. | No activation/revision change; the orphan is retained under injected SQL failure. Measure bytes and decide how provisional tags are reconciled after crash. |
+| H6 | P0 | **Partly observed:** a SQL failure after object-store tag sync left an orphan after garbage collection at the baseline. Repeat with a process kill in the same window and repeated failures. | No activation/revision change. Current fault/reopen reconciliation makes the injected-SQL-failure orphan collectable while retaining committed references. Process-kill coverage and byte-growth measurements remain separate experiments. |
 | H7 | P0 | Validator and evidence faults: reject, missing bytes, mismatched digest, panic, and repeated contract/digest in one activation or rewrite. | No partial kernel or durable commit; error class stable; successful proof reuse does not rely on validator invocation count. |
 | H8 | P1 | Dynamic audit: activation → outbound → transfer → rewrite → restart, then request full verification. | Ordinary reopen preserves graph, frontier, history, content, and revision. `to_parts` and verified reopen reject dynamic history by current design. |
 | H9 | P1 | **Observed:** supply a caller-made rewrite grammar to direct `Kernel::prepare_rewrite`, then attempt the same rule through default and configured runtimes. | Direct kernel accepts the supplied grammar; default runtime rejects the production; configured runtime accepts preparation. |
@@ -240,11 +252,15 @@ capacity. Source locations are starting points for the test.
 | H12 | P1 | Authoring parity: express multiple roots, custom edge types, grammar, and dynamic executable binding through direct Rust, native JSON, and concise project forms. | Produce a capability/rejection matrix; distinguish deliberate abstraction from silently dropped semantics. |
 | H13 | P1 | Fixed-graph restoration mutation: alter every canonical record field in turn, including producer, consumed edge, authority, digest, and definition fingerprint. | Invalid records reject; valid topological reorder restores the same canonical state and causal DAG. |
 | H14 | P1 | Receipt migration policy: replace an `All` node's edge after it receives work, then try every legal subsequent operation. | **Resolved:** the receipt is retired as `RouteRemoved` at the rewrite; see O2. |
-| H15 | P2 | Local rewrite cost: hold graph/frontier constant; compare 100 and 10,000 consumed roots with distinct result bytes. | Same semantic result; measure result reads, lock wait, latency, and peak memory. Source suggests full-history materialization. |
+| H15 | P2 | Local rewrite cost: hold graph/frontier constant; compare 100 and 10,000 consumed roots with distinct result bytes, then independently increase graph size. | Same semantic result; measure result reads, lock wait, latency, and peak memory. Current preparation reads the live frontier and lifetime identity sets without consumed-history materialization, but still re-admits the whole replacement definition. |
 | H16 | P2 | Width, depth, and session count: wide fan-out, deep static cycle, many tiny sessions, many concurrent readers/writers. | No overflow or state divergence; record throughput, p95 latency, peak RSS, thread/FD count, and failure threshold. |
 
 Routine reopen (`ProposalRuntime::open_persistent`) checks the derived
-readiness indexes at O(frontier) cost and trusts the rows otherwise; the
+readiness indexes at O(frontier) cost and scans committed graph and invocation
+reference metadata to reconcile ledger tags, so overall restart cost grows with
+recorded history. Faulted sessions additionally
+validate a complete checkpoint and all committed content before reopening
+admission. The
 invariants I1–I7 of [docs/TRANSITIONS.md](docs/TRANSITIONS.md) are checked
 through `Kernel::restore_checkpoint` whenever the session exports its exact
 state (`snapshot`, `try_snapshot`, and the verified reopen), which the
@@ -311,9 +327,10 @@ to the invocation store, and recognizes an accepted retry by a canonical
 encoding of the submission's facts. The application narrows the content handle
 it gives components, shares one DTO set and one duplicate-key mechanism
 between its two authoring formats, closes a fresh run on every start failure,
-and fails a drifted resume closed unless partial resume is requested;
-`ContentStore::release` makes a rejected workspace capture's imports
-collectable; and the workspace crate declares its Unix posture once at the
+and fails a drifted resume closed unless partial resume is requested. Staged
+workspace captures now hold their own temporary content pins, so rejection
+drops only their ownership; successful publication retains their imports. The
+workspace crate declares its Unix posture once at the
 crate root. The calculus crate compiles alone against 20 third-party
 packages, all in the transitive closure of `serde`, `sha2`, `thiserror`, and
 `uuid`, so the law can be checked without building any storage or networking

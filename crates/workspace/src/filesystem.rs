@@ -137,8 +137,13 @@ pub(super) fn validate_entries(
     let mut total = 0_u64;
     for (path, kind) in source {
         validate_path(path)?;
-        if !folded.insert(path.to_lowercase()) {
-            return Err(WorkspaceError::Invalid("case-colliding paths".into()));
+        if !folded.insert(
+            unicode_normalization::UnicodeNormalization::nfc(path.to_lowercase().as_str())
+                .collect::<String>(),
+        ) {
+            return Err(WorkspaceError::Invalid(
+                "case- or Unicode-normalization-colliding paths".into(),
+            ));
         }
         if let Some((parent, _)) = path.rsplit_once('/')
             && source.get(parent) != Some(&EntryKind::Directory)
