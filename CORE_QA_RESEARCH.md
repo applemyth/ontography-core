@@ -14,25 +14,27 @@ study. The initial temporary Cargo harness used the sibling `ontography-app`
 dependency manifest and its vendored `iroh-blobs`, while compiling this
 snapshot's `src/lib.rs`. Build output stayed in `/tmp`.
 
-| Exact-snapshot probe | Result | Qualification |
+| Test binary (`cargo test --offline --workspace`, 26 September 2026) | Result | Qualification |
 | --- | --- | --- |
-| Native `cargo test --offline --all-targets` with the local manifest | 50 passed, 1 ignored | Includes the in-source tests and retained probes; uses the local vendored dependency. |
-| In-source library tests | 33 passed | Includes the exhaustive cleanup worlds and checkpoint retirement validation. |
-| Sibling `calculus.rs` adapted to remove one unavailable `Trigger::Session` match arm | 52 passed, 1 ignored | This exercised this snapshot's source, but the transplanted test file is not in this checkout. |
-| Sibling `frontier_rewrite.rs` and `outbound_admission.rs`, with their helper module | 15 passed | These also exercised this snapshot's source. |
-| New [public API probes](tests/hypothesis_probes.rs) | 7 passed | These tests are retained in this checkout. |
+| In-source unit tests: calculus 9, content 8, runtime 23, workspace 1 | 41 passed | Exhaustive cleanup worlds, fragment-encoding golden bytes, object-store retention and release, session fault classification, corrupt-evidence and context-store fault rules, the canonical retry commitment. |
+| [Ported calculus suite](tests/calculus.rs) | 52 passed, 1 ignored | The ignored wide fan-out restoration probe is a scalability run meant for release mode. |
+| [Adapter equivalence](tests/adapter_equivalence.rs) | 1 passed | Twelve seeds of 120 random steps comparing the `SQLite` adapter with the in-memory state, including stale plans, node reaping, poisoned outgoing edges (`NoAcceptingEdge`), and rejected rewrites and extensions. |
+| [Negative verification](tests/verify_negative.rs) | 4 passed | Forged views drive every evaluator; `State::apply` against the true state rejects with the exact `ApplyError`. |
+| [Rule coverage](tests/rule_coverage.rs) and [definition errors](tests/definition_errors.rs) | 10 and 4 passed | Admission rules without a dedicated test elsewhere, and every `DefinitionError` variant pinned by name. |
+| [Frontier rewrite](tests/frontier_rewrite.rs) and [outbound admission](tests/outbound_admission.rs), with their helper module | 9 and 6 passed | The sibling suites, now retained in this checkout. |
+| [Public API probes](tests/hypothesis_probes.rs) | 7 passed | Retained from the original study. |
 | [Application API probes](tests/api_surface_probes.rs) | 4 passed | Root creation, caller scope, rewrite-grammar ownership, and nested JSON duplicate-key behavior. |
+| [Application authoring](tests/application_authoring.rs), [lifecycle](tests/application_lifecycle.rs), and [extension](tests/application_extension.rs) | 3, 2, and 1 passed | Format parity, start-failure closure and resume drift, vocabulary extension of a running application. |
 | [Content-composition probe](tests/content_composition_probe.rs) | 1 passed | Workspace capture reuses an unchanged file, emits a small package envelope, and commits the declared content closure. |
 | [Frontier operation probes](tests/frontier_operations.rs) | 4 passed | Explicit retirement, `All` route removal, disjoint-rewrite commutativity, vocabulary extension. |
 | [Persistent frontier probe](tests/persistent_frontier.rs) | 1 passed | Retirement records and an extension survive reopen with an exact snapshot. |
-| Isolated SQL-failure/content-GC diagnostic | 1 passed | A rollback left no activation but its exact payload remained readable after garbage collection. |
 | [Desired orphan-reclamation regression](tests/orphan_retention_probe.rs) | 1 ignored | It asserts reclamation and currently fails if enabled. |
 
-The temporary harness separately recorded 107 passes and two ignored tests;
-the native count overlaps with it and should not be added to that total. The
-native `cargo fmt --check` and strict all-target Clippy also passed. The
-sibling source has diverged, notably in session triggers and later runtime
-features. Its [mathematical definition](../ontography-app/MATHEMATICAL_DEFINITION.md)
+The workspace total is 150 passed, 0 failed, 2 ignored; `cargo fmt --check`,
+strict all-target Clippy, and `cargo doc` also pass. The earlier harness
+counts (50 native passes, 107 temporary-harness passes) are superseded and
+must not be added to this total. The sibling source has diverged, notably in
+session triggers and later runtime features. Its [mathematical definition](../ontography-app/MATHEMATICAL_DEFINITION.md)
 and [frontier rewrite design](../ontography-app/docs/FRONTIER_REWRITING.md)
 are specification candidates, not independent certification of this snapshot.
 The mathematical definition expressly limits its restoration theorem to the
@@ -116,7 +118,7 @@ deliberately narrower control:
 | Automatically launch a newly added node | Host can be launched explicitly | Original bindings alone are launched | No automatic dynamic binding found |
 | Reserve unused node types/tags for a future graph | Explicit schema | Schema derived from initial placements | Same builder path |
 | Independently verify a dynamic run's full history | No public full replay path found | No additional path found | No additional path found |
-| Reuse prior artifact content in a new package | `PackageStore` collection/changes and `submit_with_content` | `WorkspaceStore::capture` and `ApplicationWorkspace::finish` | The artifact model is reached through implementation code, not declared directly in these formats |
+| Reuse prior artifact content in a new package | `PackageStore` collection/changes and `submit_with_content` | `WorkspaceStore::capture` and `PreparedWorkspace::finish` | The artifact model is reached through implementation code, not declared directly in these formats |
 
 The hosted API also exposes two different submission contracts. Raw
 `ApplicationContext::submit` accepts any proposal the kernel admits, regardless
@@ -137,8 +139,8 @@ and retired as `NoAcceptingEdge`, only by a rewrite that changes its holder's
 outgoing edge set, whether by removal or addition. Probes:
 `identity_graph_rewrite_retains_unroutable_outbound_work` and
 `changing_the_holders_outgoing_edges_rechecks_outbound_work`; the operative
-code is [cleanup](src/kernel/frontier.rs) and
-[rewrite preparation](src/kernel/rewrite.rs).
+code is [cleanup](crates/calculus/src/kernel/frontier.rs) and
+[rewrite preparation](crates/calculus/src/kernel/rewrite.rs).
 
 **O2 — A receipt at an `All` receiver is retired when its delivery edge leaves
 the incoming set** (revised 25 September 2026). Deliver on `e1` to B, then
@@ -175,9 +177,9 @@ activation afterward. Reopening the run showed the payload was still readable;
 this snapshot. The retained regression test asserts the desired absence after
 collection and is ignored until reclamation is fixed. The relevant order is
 `objects.put_all` before `transaction.commit` in
-[SQLite submission](src/runtime/sqlite.rs), persistent named tags in
-[object storage](src/runtime/object_store/iroh.rs), and garbage collection
-marking every tag in [content.rs](src/content.rs). A process crash in that same
+[SQLite submission](crates/runtime/src/sqlite.rs), persistent named tags in
+[object storage](crates/runtime/src/object_store/iroh.rs), and garbage collection
+marking every tag in [content.rs](crates/content/src/content.rs). A process crash in that same
 window needs its own separate probe; the injected SQL failure establishes the
 retention path without simulating a crash. Reconciliation must distinguish
 unreferenced activation payload tags from intentionally retained content tags.
@@ -241,9 +243,16 @@ capacity. Source locations are starting points for the test.
 | H15 | P2 | Local rewrite cost: hold graph/frontier constant; compare 100 and 10,000 consumed roots with distinct result bytes. | Same semantic result; measure result reads, lock wait, latency, and peak memory. Source suggests full-history materialization. |
 | H16 | P2 | Width, depth, and session count: wide fan-out, deep static cycle, many tiny sessions, many concurrent readers/writers. | No overflow or state divergence; record throughput, p95 latency, peak RSS, thread/FD count, and failure threshold. |
 
+Routine reopen (`ProposalRuntime::open_persistent`) checks the derived
+readiness indexes at O(frontier) cost and trusts the rows otherwise; the
+invariants I1–I7 of [docs/TRANSITIONS.md](docs/TRANSITIONS.md) are checked
+through `Kernel::restore_checkpoint` whenever the session exports its exact
+state (`snapshot`, `try_snapshot`, and the verified reopen), which the
+adapter-equivalence test does after every step.
+
 Two additional static seams should be checked during H12. The concise project
 compiler lowers connection types to `Connection` in
-[project.rs](src/project.rs), while direct edge definitions allow other types.
+[project.rs](crates/application/src/project.rs), while direct edge definitions allow other types.
 The JSON application configuration has no grammar field, although
 `Application::with_grammar` does. These are expressiveness questions with
 straightforward before/after admission tests.
@@ -282,3 +291,30 @@ owned dynamic ledger on routine reopen. Tests can establish behavior under
 these assumptions and expose failures at their boundaries. They cannot prove
 opaque external executables, caller authentication, or arbitrary future
 workflows correct without additional contracts and evidence.
+
+## Workspace split
+
+The single crate is now a Cargo workspace: `ontography-calculus` holds the
+graph law and the storage adapter contract, `ontography-content`,
+`ontography-runtime`, `ontography-workspace`, and `ontography-application`
+build on it in that order, and the root package `ontography-core` is a facade
+that re-exports the same names as before, plus `ontography::storage`. The
+split came with reductions that did change behavior and public API, each
+listed in its round's report. The kernel's dynamics are one transition model
+(`Transition`, `Transition::verify`, `State::apply`) shared by the in-memory
+state and the `SQLite` adapter, whose parity the differential test pins, and
+`restore_checkpoint` verifies I1–I7 plus the definition binding. The session
+reports failure through one `SessionError` set and one fault ladder, treats
+missing or corrupt payload evidence for a package it has a row for as a
+`Storage` failure rather than a kernel rejection, applies the same fault rule
+to the invocation store, and recognizes an accepted retry by a canonical
+encoding of the submission's facts. The application narrows the content handle
+it gives components, shares one DTO set and one duplicate-key mechanism
+between its two authoring formats, closes a fresh run on every start failure,
+and fails a drifted resume closed unless partial resume is requested;
+`ContentStore::release` makes a rejected workspace capture's imports
+collectable; and the workspace crate declares its Unix posture once at the
+crate root. The calculus crate compiles alone against 20 third-party
+packages, all in the transitive closure of `serde`, `sha2`, `thiserror`, and
+`uuid`, so the law can be checked without building any storage or networking
+code.
