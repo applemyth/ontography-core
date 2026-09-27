@@ -11,6 +11,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install the pinned toolchain
         run: rustup show
+      - name: Install elan
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: Build the Lean oracle
+        run: cd formal && lake build oracle
       - name: Formatting
         run: cargo fmt --all --check
       - name: Lints
@@ -19,3 +25,7 @@ jobs:
         run: cargo test --workspace
       - name: Release tests
         run: cargo test --workspace --release
+      - name: Kernel against the Lean model
+        env:
+          ONTOGRAPHY_REQUIRE_LEAN_ORACLE: "1"
+        run: cargo test --test lean_oracle

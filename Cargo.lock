@@ -2265,6 +2265,7 @@ dependencies = [
  "ontography-runtime",
  "ontography-workspace",
  "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

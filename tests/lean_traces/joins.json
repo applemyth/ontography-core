@@ -1,0 +1,74 @@
+{
+  "format": "ontography-lean-trace/1",
+  "name": "joins",
+  "definition": {
+    "schema": {"node_types": ["n"], "object_types": ["t"], "tags": ["p", "q"]},
+    "contracts": [{"id": "any", "object_type": "t", "validator": "accept_all"}],
+    "nodes": ["a", "j", "b"],
+    "edges": [
+      {"id": "aj1", "source": "a", "target": "j"},
+      {"id": "aj2", "source": "a", "target": "j"},
+      {"id": "ab1", "source": "a", "target": "b"},
+      {"id": "ab2", "source": "a", "target": "b"}
+    ],
+    "node_definitions": [
+      {"node": "a", "types": ["n"], "result_contract": "any", "ingress": "any"},
+      {"node": "j", "types": ["n"], "result_contract": "any", "ingress": "all"},
+      {"node": "b", "types": ["n"], "result_contract": "any", "ingress": "any"}
+    ],
+    "edge_definitions": [
+      {"edge": "aj1", "types": ["flow"], "source_requirements": [], "target_requirements": [], "package_contract": "any", "tags": ["p", "q"], "authority_match": "any_of"},
+      {"edge": "aj2", "types": ["flow"], "source_requirements": [], "target_requirements": [], "package_contract": "any", "tags": ["p", "q"], "authority_match": "any_of"},
+      {"edge": "ab1", "types": ["flow"], "source_requirements": [], "target_requirements": [], "package_contract": "any", "tags": ["p", "q"], "authority_match": "any_of"},
+      {"edge": "ab2", "types": ["flow"], "source_requirements": [], "target_requirements": [], "package_contract": "any", "tags": ["p", "q"], "authority_match": "any_of"}
+    ],
+    "transitions": [],
+    "roots": [{"node": "a", "ceiling": ["p", "q"]}]
+  },
+  "digests": {
+    "01": "131ab68174b39cdfd7bf4d2fb395892b5ef29433c9885a8300504f23f6a0781b",
+    "02": "84824b7975951bccacbfaa4db8b69d261f636165ec2dafee7705612e8b91e60e",
+    "03": "d64ee772db2166fde02e7bcfae544efa707f5b8d1a94a78463bf9af12a2f8d6f",
+    "04": "a70c0643d66edc26c9fd5f9f88079dd07e7562245c922aa91460afe5508ce9bd",
+    "05": "2e1c3c66095586eae1182ac61053272427a0549056f643c91e9bb74422e3227c",
+    "06": "11b22d27e5ebc9fb8b3f621ac71ad17677a19aa60f6a0087fe2a320b1057facb",
+    "07": "879024b1709274bd5164be34972b507271c841288b20293b25870b4773ac96e9",
+    "08": "dc7a372632baeafc4cda212a19c92472da0a85125179a583aa7a94f4609b0525",
+    "09": "bcf1fe8618f4b5941ce0d402d95781fe7c8e708c32023e7e0b3c6395c98d3c4c",
+    "0a": "9127cfdd98cb4be8b236b581e33382f42f78e0ed2cadf344522001e8fdea6afb"
+  },
+  "ops": [
+    {"op": "activate", "id": "1", "trigger": {"orig": {"node": "a", "authority": ["p"]}}, "result": "", "emissions": [
+      {"destination": {"delivered": "aj1"}, "authority": "carry", "payload": "01"},
+      {"destination": {"delivered": "aj2"}, "authority": "carry", "payload": "02"},
+      {"destination": {"delivered": "ab1"}, "authority": "carry", "payload": "03"},
+      {"destination": {"delivered": "ab1"}, "authority": "carry", "payload": "04"},
+      {"destination": {"delivered": "ab2"}, "authority": "carry", "payload": "05"},
+      {"destination": {"outbound": "t"}, "authority": "carry", "payload": "06"}
+    ], "expect": {"accepted": true}},
+    {"op": "activate", "id": "2", "trigger": {"pkgs": [["1", 0]]}, "result": "", "emissions": [], "expect": {"accepted": false}},
+    {"op": "activate", "id": "3", "trigger": {"pkgs": [["1", 1], ["1", 0]]}, "result": "", "emissions": [], "expect": {"accepted": true}},
+    {"op": "activate", "id": "4", "trigger": {"pkgs": [["1", 0], ["1", 1]]}, "result": "", "emissions": [], "expect": {"accepted": false}},
+    {"op": "activate", "id": "5", "trigger": {"pkgs": [["1", 2], ["1", 3]]}, "result": "", "emissions": [], "expect": {"accepted": false}},
+    {"op": "activate", "id": "6", "trigger": {"pkgs": [["1", 2], ["1", 4]]}, "result": "", "emissions": [], "expect": {"accepted": false}},
+    {"op": "activate", "id": "7", "trigger": {"pkgs": [["1", 5]]}, "result": "", "emissions": [], "expect": {"accepted": false}},
+    {"op": "activate", "id": "8", "trigger": {"orig": {"node": "a", "authority": ["q", "p"]}}, "result": "", "emissions": [
+      {"destination": {"delivered": "aj1"}, "authority": "carry", "payload": "07"},
+      {"destination": {"delivered": "aj2"}, "authority": "carry", "payload": "08"}
+    ], "expect": {"accepted": true}},
+    {"op": "activate", "id": "9", "trigger": {"orig": {"node": "a", "authority": ["p"]}}, "result": "", "emissions": [
+      {"destination": {"delivered": "aj2"}, "authority": "carry", "payload": "09"}
+    ], "expect": {"accepted": true}},
+    {"op": "activate", "id": "10", "trigger": {"pkgs": [["8", 0], ["9", 0]]}, "result": "", "emissions": [], "expect": {"accepted": false}},
+    {"op": "activate", "id": "11", "trigger": {"pkgs": [["8", 0], ["8", 1], ["9", 0]]}, "result": "", "emissions": [], "expect": {"accepted": false}},
+    {"op": "activate", "id": "12", "trigger": {"pkgs": [["8", 0], ["1", 5]]}, "result": "", "emissions": [], "expect": {"accepted": false}},
+    {"op": "activate", "id": "13", "trigger": {"pkgs": []}, "result": "", "emissions": [], "expect": {"accepted": false}},
+    {"op": "activate", "id": "14", "trigger": {"pkgs": [["77", 0]]}, "result": "", "emissions": [], "expect": {"accepted": false}},
+    {"op": "activate", "id": "15", "trigger": {"pkgs": [["1", 9]]}, "result": "", "emissions": [], "expect": {"accepted": false}},
+    {"op": "activate", "id": "16", "trigger": {"pkgs": [["8", 1], ["8", 0]]}, "result": "", "emissions": [
+      {"destination": {"outbound": "t"}, "authority": "carry", "payload": "0a"}
+    ], "expect": {"accepted": true}},
+    {"op": "activate", "id": "17", "trigger": {"pkgs": [["1", 3], ["9", 0]]}, "result": "", "emissions": [], "expect": {"accepted": false}},
+    {"op": "activate", "id": "18", "trigger": {"pkgs": [["1", 2]]}, "result": "", "emissions": [], "expect": {"accepted": true}}
+  ]
+}

@@ -1,0 +1,80 @@
+{
+  "format": "ontography-lean-trace/1",
+  "name": "transfers",
+  "definition": {
+    "schema": {"node_types": ["n"], "object_types": ["t", "u"], "tags": ["run", "audit"]},
+    "contracts": [
+      {"id": "any", "object_type": "t", "validator": "accept_all"},
+      {"id": "none", "object_type": "t", "validator": "reject_all"},
+      {"id": "even", "object_type": "t", "validator": "first_byte_even"},
+      {"id": "ok", "object_type": "u", "validator": {"bytes_equal": "6f6b"}}
+    ],
+    "nodes": ["a", "b", "x"],
+    "edges": [
+      {"id": "ab", "source": "a", "target": "b"},
+      {"id": "ab_all", "source": "a", "target": "b"},
+      {"id": "ab_none", "source": "a", "target": "b"},
+      {"id": "ab_even", "source": "a", "target": "b"},
+      {"id": "ab_ok", "source": "a", "target": "b"},
+      {"id": "xx", "source": "x", "target": "x"}
+    ],
+    "node_definitions": [
+      {"node": "a", "types": ["n"], "result_contract": "any", "ingress": "any"},
+      {"node": "b", "types": ["n"], "result_contract": "any", "ingress": "any"},
+      {"node": "x", "types": ["n"], "result_contract": "any", "ingress": "any"}
+    ],
+    "edge_definitions": [
+      {"edge": "ab", "types": ["flow"], "source_requirements": [], "target_requirements": [], "package_contract": "any", "tags": ["run"], "authority_match": "any_of"},
+      {"edge": "ab_all", "types": ["flow"], "source_requirements": [], "target_requirements": [], "package_contract": "any", "tags": ["run", "audit"], "authority_match": "all_of"},
+      {"edge": "ab_none", "types": ["flow"], "source_requirements": [], "target_requirements": [], "package_contract": "none", "tags": ["run"], "authority_match": "any_of"},
+      {"edge": "ab_even", "types": ["flow"], "source_requirements": [], "target_requirements": [], "package_contract": "even", "tags": ["run"], "authority_match": "any_of"},
+      {"edge": "ab_ok", "types": ["flow"], "source_requirements": [], "target_requirements": [], "package_contract": "ok", "tags": ["run"], "authority_match": "any_of"},
+      {"edge": "xx", "types": ["loop"], "source_requirements": [], "target_requirements": [], "package_contract": "any", "tags": ["run"], "authority_match": "any_of"}
+    ],
+    "transitions": [],
+    "roots": [{"node": "a", "ceiling": ["run", "audit"]}, {"node": "x", "ceiling": ["run"]}]
+  },
+  "digests": {
+    "01": "131ab68174b39cdfd7bf4d2fb395892b5ef29433c9885a8300504f23f6a0781b",
+    "02": "84824b7975951bccacbfaa4db8b69d261f636165ec2dafee7705612e8b91e60e",
+    "03": "d64ee772db2166fde02e7bcfae544efa707f5b8d1a94a78463bf9af12a2f8d6f",
+    "04": "a70c0643d66edc26c9fd5f9f88079dd07e7562245c922aa91460afe5508ce9bd",
+    "05": "2e1c3c66095586eae1182ac61053272427a0549056f643c91e9bb74422e3227c",
+    "6e6f": "2a6073cf3f7933bd0919e2b0badb848eee536d43f09fd29f5e3d6e962560f5db",
+    "6f6b": "c8c320f236fcefd7c4e359f9d9e2aa237cf58cb54ee7228f294c5e0f364d2797"
+  },
+  "ops": [
+    {"op": "activate", "id": "1", "trigger": {"orig": {"node": "a", "authority": ["run"]}}, "result": "", "emissions": [
+      {"destination": {"outbound": "t"}, "authority": "carry", "payload": "01"},
+      {"destination": {"outbound": "t"}, "authority": "carry", "payload": "02"},
+      {"destination": {"outbound": "u"}, "authority": "carry", "payload": "6f6b"},
+      {"destination": {"outbound": "u"}, "authority": "carry", "payload": "6e6f"},
+      {"destination": {"outbound": "t"}, "authority": "carry", "payload": "03"}
+    ], "expect": {"accepted": true}},
+    {"op": "activate", "id": "2", "trigger": {"orig": {"node": "a", "authority": []}}, "result": "",
+     "emissions": [{"destination": {"outbound": "t"}, "authority": "carry", "payload": "04"}], "expect": {"accepted": true}},
+    {"op": "activate", "id": "3", "trigger": {"orig": {"node": "x", "authority": ["run"]}}, "result": "",
+     "emissions": [{"destination": {"outbound": "t"}, "authority": "carry", "payload": "05"}], "expect": {"accepted": true}},
+    {"op": "transfer", "package": ["1", 0], "edge": "ab", "payload": "01", "expect": {"accepted": true}},
+    {"op": "transfer", "package": ["1", 0], "edge": "ab", "payload": "01", "expect": {"accepted": false}},
+    {"op": "transfer", "package": ["1", 1], "edge": "xx", "payload": "02", "expect": {"accepted": false}},
+    {"op": "transfer", "package": ["1", 1], "edge": "zz", "payload": "02", "expect": {"accepted": false}},
+    {"op": "transfer", "package": ["1", 1], "edge": "ab_ok", "payload": "02", "expect": {"accepted": false}},
+    {"op": "transfer", "package": ["2", 0], "edge": "ab", "payload": "04", "expect": {"accepted": false}},
+    {"op": "transfer", "package": ["1", 1], "edge": "ab_all", "payload": "02", "expect": {"accepted": false}},
+    {"op": "transfer", "package": ["1", 1], "edge": "ab_none", "payload": "02", "expect": {"accepted": false}},
+    {"op": "transfer", "package": ["1", 1], "edge": "ab", "payload": "01", "expect": {"accepted": false}},
+    {"op": "transfer", "package": ["1", 4], "edge": "ab_even", "payload": "03", "expect": {"accepted": false}},
+    {"op": "transfer", "package": ["1", 1], "edge": "ab_even", "payload": "02", "expect": {"accepted": true}},
+    {"op": "transfer", "package": ["1", 2], "edge": "ab_ok", "payload": "6f6b", "expect": {"accepted": true}},
+    {"op": "transfer", "package": ["1", 3], "edge": "ab_ok", "payload": "6e6f", "expect": {"accepted": false}},
+    {"op": "transfer", "package": ["1", 3], "edge": "ab_ok", "payload": "6f6b", "expect": {"accepted": false}},
+    {"op": "transfer", "package": ["3", 0], "edge": "xx", "payload": "05", "expect": {"accepted": true}},
+    {"op": "activate", "id": "4", "trigger": {"pkgs": [["3", 0]]}, "result": "", "emissions": [], "expect": {"accepted": true}},
+    {"op": "transfer", "package": ["3", 0], "edge": "xx", "payload": "05", "expect": {"accepted": false}},
+    {"op": "transfer", "package": ["9", 0], "edge": "ab", "payload": "01", "expect": {"accepted": false}},
+    {"op": "retire", "package": ["1", 4], "evidence": null, "expect": {"accepted": true}},
+    {"op": "transfer", "package": ["1", 4], "edge": "ab", "payload": "03", "expect": {"accepted": false}},
+    {"op": "activate", "id": "5", "trigger": {"pkgs": [["1", 0]]}, "result": "", "emissions": [], "expect": {"accepted": true}}
+  ]
+}

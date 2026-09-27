@@ -4,3 +4,13 @@ defaultTargets = ["Ontography"]
 
 [[lean_lib]]
 name = "Ontography"
+
+# The trace oracle's helper modules (`Oracle.*`), which the executable imports.
+[[lean_lib]]
+name = "Oracle"
+globs = ["Oracle.+"]
+
+# Replays a kernel trace with the model's `step`; see TRACE_FORMAT.md.
+[[lean_exe]]
+name = "oracle"
+root = "Oracle.Main"

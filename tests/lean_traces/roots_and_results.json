@@ -1,0 +1,39 @@
+{
+  "format": "ontography-lean-trace/1",
+  "name": "roots_and_results",
+  "definition": {
+    "schema": {"node_types": ["n"], "object_types": ["t"], "tags": ["run", "audit", "admin"]},
+    "contracts": [
+      {"id": "any", "object_type": "t", "validator": "accept_all"},
+      {"id": "even", "object_type": "t", "validator": "first_byte_even"}
+    ],
+    "nodes": ["a", "b"],
+    "edges": [{"id": "ab", "source": "a", "target": "b"}],
+    "node_definitions": [
+      {"node": "a", "types": ["n"], "result_contract": "even", "ingress": "any"},
+      {"node": "b", "types": ["n"], "result_contract": "any", "ingress": "any"}
+    ],
+    "edge_definitions": [
+      {"edge": "ab", "types": ["flow"], "source_requirements": [], "target_requirements": [], "package_contract": "any", "tags": ["run"], "authority_match": "any_of"}
+    ],
+    "transitions": [],
+    "roots": [{"node": "a", "ceiling": ["audit", "run"]}]
+  },
+  "digests": {
+    "6f6b": "c8c320f236fcefd7c4e359f9d9e2aa237cf58cb54ee7228f294c5e0f364d2797"
+  },
+  "ops": [
+    {"op": "activate", "id": "1", "trigger": {"orig": {"node": "a", "authority": ["run"]}}, "result": "02", "emissions": [], "expect": {"accepted": true}},
+    {"op": "activate", "id": "2", "trigger": {"orig": {"node": "a", "authority": ["ghost"]}}, "result": "02", "emissions": [], "expect": {"accepted": false}},
+    {"op": "activate", "id": "3", "trigger": {"orig": {"node": "a", "authority": ["admin"]}}, "result": "02", "emissions": [], "expect": {"accepted": false}},
+    {"op": "activate", "id": "4", "trigger": {"orig": {"node": "a", "authority": ["run", "admin"]}}, "result": "02", "emissions": [], "expect": {"accepted": false}},
+    {"op": "activate", "id": "5", "trigger": {"orig": {"node": "b", "authority": ["run"]}}, "result": "02", "emissions": [], "expect": {"accepted": false}},
+    {"op": "activate", "id": "6", "trigger": {"orig": {"node": "nowhere", "authority": []}}, "result": "02", "emissions": [], "expect": {"accepted": false}},
+    {"op": "activate", "id": "7", "trigger": {"orig": {"node": "a", "authority": []}}, "result": "02", "emissions": [], "expect": {"accepted": true}},
+    {"op": "activate", "id": "8", "trigger": {"orig": {"node": "a", "authority": ["run", "audit", "run"]}}, "result": "02",
+     "emissions": [{"destination": {"delivered": "ab"}, "authority": "carry", "payload": "6f6b"}], "expect": {"accepted": true}},
+    {"op": "activate", "id": "9", "trigger": {"orig": {"node": "a", "authority": ["run"]}}, "result": "01", "emissions": [], "expect": {"accepted": false}},
+    {"op": "activate", "id": "10", "trigger": {"orig": {"node": "a", "authority": ["run"]}}, "result": "", "emissions": [], "expect": {"accepted": false}},
+    {"op": "activate", "id": "11", "trigger": {"pkgs": [["8", 0]]}, "result": "", "emissions": [], "expect": {"accepted": true}}
+  ]
+}
