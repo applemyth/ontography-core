@@ -5,6 +5,7 @@ import Ontography.Replay
 import Ontography.Proofs.Runs
 import Ontography.Proofs.Replay
 import Ontography.Proofs.Checkpoint
+import Ontography.Proofs.Commutation
 
 /-!
 # Metatheory
@@ -30,8 +31,8 @@ theorem rewrite_local (hΔ : Δ.Admitted) (hS : WF Δ S) {req : RewriteRequest}
     (h : rewrite accepts H grammar Δ S req evidence = some (Δ', S'))
     {q : PackageId} {r r' : PackageRecord} (hr : S.packages q = some r)
     (hr' : S'.packages q = some r') (hchanged : r' ≠ r) :
-    r.status = .live ∧ Affected Δ Δ' r.holder := by
-  sorry
+    r.status = .live ∧ Affected Δ Δ' r.holder :=
+  Proofs.rewrite_local hΔ hS h hr hr' hchanged
 
 /-- T4: rewrites whose affected holders are disjoint across both orders commute on every
 package record, up to retirement stamps, when both orders apply and yield the same
@@ -46,8 +47,8 @@ theorem rewrite_commute (hΔ : Δ.Admitted) (hS : WF Δ S) {ρ₁ ρ₂ : Rewrit
     (hdisjoint : ∀ v, Affected Δ Δ₁ v ∨ Affected Δ₂ Δ₂₁ v →
       ¬ (Affected Δ Δ₂ v ∨ Affected Δ₁ Δ₁₂ v)) (q : PackageId) :
     (S₁₂.packages q).map PackageRecord.unstamped =
-      (S₂₁.packages q).map PackageRecord.unstamped := by
-  sorry
+      (S₂₁.packages q).map PackageRecord.unstamped :=
+  Proofs.rewrite_commute hΔ hS h₁ h₁₂ h₂ h₂₁ hsame hdisjoint q
 
 end
 
