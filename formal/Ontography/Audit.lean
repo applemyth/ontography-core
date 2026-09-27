@@ -46,3 +46,6 @@ elab "#assert_standard_axioms " id:ident : command => do
 #assert_standard_axioms Ontography.checkpoint_of_wf
 #assert_standard_axioms Ontography.rewrite_local
 #assert_standard_axioms Ontography.rewrite_commute
+#assert_standard_axioms Ontography.sysSteps_frame
+#assert_standard_axioms Ontography.accepted_not_reaccepted
+#assert_standard_axioms Ontography.sysStep_newborn

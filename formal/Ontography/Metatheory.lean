@@ -44,8 +44,8 @@ theorem rewrite_commute (hΔ : Δ.Admitted) (hS : WF Δ S) {ρ₁ ρ₂ : Rewrit
     Δ₁₂.Equiv Δ₂₁ ∧
       ((∀ v, Affected Δ Δ₁ v ∨ Affected Δ₂ Δ₂₁ v → ¬ (Affected Δ Δ₂ v ∨ Affected Δ₁ Δ₁₂ v)) →
         ∀ q, (S₁₂.packages q).map PackageRecord.unstamped =
-          (S₂₁.packages q).map PackageRecord.unstamped) := by
-  sorry
+          (S₂₁.packages q).map PackageRecord.unstamped) :=
+  Proofs.rewrite_commute hΔ hS h₁ h₁₂ h₂ h₂₁
 
 end
 
@@ -59,21 +59,21 @@ variable {accepts : ContractId → Bytes → Bool} {H : Bytes → Digest}
 activations, each package's immutable facts, deliveries once made, settled statuses, and the
 lifetime records, which only grow. -/
 theorem sysSteps_frame (hΔ : Δ.Admitted) (hS : WF Δ S)
-    (h : SysSteps accepts H grammar Δ S Δ' S') : Frame S S' := by
-  sorry
+    (h : SysSteps accepts H grammar Δ S Δ' S') : Frame S S' :=
+  Proofs.sysSteps_frame hΔ hS h
 
 /-- An accepted activation identity is never accepted again. -/
 theorem accepted_not_reaccepted {a : ActivationId} (ha : S.activations a ≠ none)
-    {prop : Proposal} : activate accepts H Δ S a prop = none := by
-  sorry
+    {prop : Proposal} : activate accepts H Δ S a prop = none :=
+  Proofs.accepted_not_reaccepted ha
 
 /-- A package identity is born only with its producing activation, when that activation is
 accepted; together with `sysSteps_frame`, no package identity is born twice. -/
 theorem sysStep_newborn {op : SysOp} (h : sysStep accepts H grammar Δ S op = some (Δ', S'))
     {p : PackageId} {r : PackageRecord} (hnone : S.packages p = none)
     (hsome : S'.packages p = some r) :
-    S.activations p.producer = none ∧ S'.activations p.producer ≠ none := by
-  sorry
+    S.activations p.producer = none ∧ S'.activations p.producer ≠ none :=
+  Proofs.sysStep_newborn h hnone hsome
 
 /-- An accepted activation is never replaced. -/
 theorem activation_persists (hΔ : Δ.Admitted) (hS : WF Δ S)
