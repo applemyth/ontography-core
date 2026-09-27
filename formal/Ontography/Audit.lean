@@ -42,3 +42,6 @@ elab "#assert_standard_axioms " id:ident : command => do
 #assert_standard_axioms Ontography.activation_persists
 #assert_standard_axioms Ontography.removed_node_never_returns
 #assert_standard_axioms Ontography.removed_edge_never_returns
+#assert_standard_axioms Ontography.checkpointValid_congr
+#assert_standard_axioms Ontography.checkpoint_of_wf
+#assert_standard_axioms Ontography.checkpoint_gap

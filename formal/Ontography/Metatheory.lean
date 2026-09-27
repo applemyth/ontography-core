@@ -4,6 +4,7 @@ import Ontography.Checkpoint
 import Ontography.Replay
 import Ontography.Proofs.Runs
 import Ontography.Proofs.Replay
+import Ontography.Proofs.Checkpoint
 
 /-!
 # Metatheory
@@ -83,19 +84,19 @@ variable {Δ : Definition} {S : State}
 
 /-- The checks read only the checkpoint. -/
 theorem checkpointValid_congr {S' : State} (hsame : SameCheckpoint S S')
-    (h : CheckpointValid Δ S) : CheckpointValid Δ S' := by
-  sorry
+    (h : CheckpointValid Δ S) : CheckpointValid Δ S' :=
+  Proofs.checkpointValid_congr hsame h
 
 /-- Restoration accepts every well-formed state, so it never rejects a reachable one. -/
-theorem checkpoint_of_wf (hΔ : Δ.Admitted) (hS : WF Δ S) : CheckpointValid Δ S := by
-  sorry
+theorem checkpoint_of_wf (hΔ : Δ.Admitted) (hS : WF Δ S) : CheckpointValid Δ S :=
+  Proofs.checkpoint_of_wf hΔ hS
 
 /-- The checks are strictly weaker than well-formedness: some admitted definition has a
 checkpoint that passes every check yet belongs to no well-formed state, because two receipts
 on a removed edge disagree about its endpoints. -/
 theorem checkpoint_gap : ∃ (Δ : Definition) (S : State), Δ.Admitted ∧ CheckpointValid Δ S ∧
-    ∀ S', SameCheckpoint S S' → ¬ WF Δ S' := by
-  sorry
+    ∀ S', SameCheckpoint S S' → ¬ WF Δ S' :=
+  Proofs.checkpoint_gap
 
 end
 
