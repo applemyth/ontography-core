@@ -1,9 +1,11 @@
 {
-  "format": "ontography-lean-trace/1",
+  "format": "ontography-lean-trace/2",
   "name": "retirements",
+  "validators": {"any": "accept_all"},
+  "grammar": [],
   "definition": {
     "schema": {"node_types": ["n"], "object_types": ["t"], "tags": ["run"]},
-    "contracts": [{"id": "any", "object_type": "t", "validator": "accept_all"}],
+    "contracts": [{"id": "any", "object_type": "t"}],
     "nodes": ["a", "b"],
     "edges": [{"id": "ab", "source": "a", "target": "b"}],
     "node_definitions": [

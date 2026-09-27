@@ -1,15 +1,15 @@
 import Oracle.Codec
-import Ontography.Step
+import Ontography.System
 
 /-!
 # Trace decoding
 
-A trace (`TRACE_FORMAT.md`) carries a definition, a validator for each
-contract drawn from a fixed menu, a payload-commitment table computed by the
-kernel, and the operations to replay. Decoding turns it into the model's
-`Definition` and `Op` values plus the two parameters of the law: the
-validators `accepts` and the commitment function `H`. It checks only the
-trace's own well-formedness, never a premise of the law.
+A trace (`TRACE_FORMAT.md`) carries the three parameters of a running workflow's law, which
+stay fixed for the whole run: the validator each contract identity names (`accepts`), the
+payload commitment computed by the kernel (`H`), and the rewrite grammar. It also carries the
+initial definition and the operations to replay. Decoding turns them into the model's
+`Definition`, `Production`, and `SysOp` values. It checks only the trace's own
+well-formedness, never a premise of the law.
 -/
 
 namespace Oracle
@@ -34,26 +34,27 @@ def Validator.accepts : Validator → Bytes → Bool
     | b :: _ => b.toNat % 2 == 0
 
 structure Trace where
-  definition : Definition
-  /-- The validator of each contract, by contract identity. -/
+  /-- The validator each contract identity names, for the whole run. -/
   validators : List (ContractId × Validator)
   /-- The kernel's commitment of each payload, keyed by the payload's lowercase hex. -/
   digests : List (String × Digest)
-  ops : List Op
+  grammar : List Production
+  definition : Definition
+  ops : List SysOp
 
-/-- The validators `accepts` of the law. An identity outside the registry
-names no predicate; an admitted definition never asks for one. -/
+/-- The validators `accepts` of the law. An identity with no validator names no predicate;
+decoding has checked that every registered contract has one. -/
 def Trace.accepts (t : Trace) (c : ContractId) (payload : Bytes) : Bool :=
-  match t.validators.find? (·.1 == c) with
-  | some (_, v) => v.accepts payload
+  match t.validators.lookup c with
+  | some v => v.accepts payload
   | none => false
 
-/-- The commitment `H` of the law, read from the table. Decoding has checked
-that every payload an operation carries has an entry. -/
+/-- The commitment `H` of the law, read from the table. Decoding has checked that every
+payload an operation carries has an entry. -/
 def Trace.commit (t : Trace) (payload : Bytes) : Digest :=
   (t.digests.lookup (hexOfBytes payload)).getD ""
 
-/-! ## Definition -/
+/-! ## Definitions and productions -/
 
 def decodeValidator (j : Json) : Except String Validator := do
   match ← variant j with
@@ -63,12 +64,18 @@ def decodeValidator (j : Json) : Except String Validator := do
   | ("bytes_equal", bytes) => return .bytesEqual (← bytesOfHex (← string bytes))
   | (tag, _) => throw s!"unknown validator \"{tag}\""
 
-def decodeContract (j : Json) : Except String (Contract × Validator) := do
-  let id ← string (← field j "id")
-  within s!"contract {id}" do
-    let objectType ← string (← field j "object_type")
-    let validator ← decodeValidator (← field j "validator")
-    return (⟨id, objectType⟩, validator)
+def decodeValidators (j : Json) : Except String (List (ContractId × Validator)) := do
+  match j with
+  | .obj kvs => kvs.toList.mapM fun (id, v) => within s!"validator {id}" do
+      return (id, ← decodeValidator v)
+  | _ => throw "expected an object from contract identity to validator"
+
+def decodeSchema (j : Json) : Except String Schema := do
+  return ⟨← strings (← field j "node_types"), ← strings (← field j "object_types"),
+    ← strings (← field j "tags")⟩
+
+def decodeContract (j : Json) : Except String Contract := do
+  return ⟨← string (← field j "id"), ← string (← field j "object_type")⟩
 
 def decodeEdge (j : Json) : Except String Edge := do
   return ⟨← string (← field j "id"), ← string (← field j "source"), ← string (← field j "target")⟩
@@ -109,15 +116,9 @@ def decodeTransition (j : Json) : Except String TransitionRule := do
 def decodeRoot (j : Json) : Except String RootRule := do
   return ⟨← string (← field j "node"), ← strings (← field j "ceiling")⟩
 
-def decodeDefinition (j : Json) : Except String (Definition × List (ContractId × Validator)) := do
-  let schema ← within "schema" do
-    let s ← field j "schema"
-    return (⟨← strings (← field s "node_types"), ← strings (← field s "object_types"),
-      ← strings (← field s "tags")⟩ : Schema)
-  let contracts ← (← array (← field j "contracts")).mapM decodeContract
-  let definition : Definition := {
-    schema
-    contracts := contracts.map (·.1)
+/-- The graph and annotations shared by a definition and a production side. -/
+def decodeFragment (j : Json) : Except String Fragment := do
+  return {
     nodes := ← within "nodes" (strings (← field j "nodes"))
     edges := ← within "edges" do (← array (← field j "edges")).mapM decodeEdge
     nodeDefs := ← (← array (← field j "node_definitions")).mapM decodeNodeDef
@@ -125,7 +126,30 @@ def decodeDefinition (j : Json) : Except String (Definition × List (ContractId 
     transitions := ← within "transitions" do
       (← array (← field j "transitions")).mapM decodeTransition
     roots := ← within "roots" do (← array (← field j "roots")).mapM decodeRoot }
-  return (definition, contracts.map fun (c, v) => (c.id, v))
+
+def decodeDefinition (j : Json) : Except String Definition := do
+  let schema ← within "schema" (decodeSchema (← field j "schema"))
+  let contracts ← within "contracts" do (← array (← field j "contracts")).mapM decodeContract
+  let F ← decodeFragment j
+  return {
+    schema
+    contracts
+    nodes := F.nodes
+    edges := F.edges
+    nodeDefs := F.nodeDefs
+    edgeDefs := F.edgeDefs
+    transitions := F.transitions
+    roots := F.roots }
+
+def decodeProduction (j : Json) : Except String Production := do
+  let id ← string (← field j "id")
+  within s!"production {id}" do
+    return {
+      id
+      left := ← within "left" (decodeFragment (← field j "left"))
+      interfaceNodes := ← strings (← field j "interface_nodes")
+      interfaceEdges := ← strings (← field j "interface_edges")
+      right := ← within "right" (decodeFragment (← field j "right")) }
 
 /-! ## Operations -/
 
@@ -155,34 +179,76 @@ def decodeEmission (j : Json) : Except String Emission := do
     | (tag, _) => throw s!"unknown output authority \"{tag}\""
   return ⟨destination, authority, ← bytesOfHex (← string (← field j "payload"))⟩
 
+/-- Symbol bindings `[[symbol, identity], ...]`. -/
+def decodeBindings (j : Json) : Except String (List (String × String)) := do
+  (← array j).mapM fun pair => do
+    match ← array pair with
+    | [symbol, identity] => return (← string symbol, ← string identity)
+    | _ => throw s!"expected a binding [symbol, identity], found {pair.compress}"
+
+def decodeMatch (j : Json) : Except String Match := do
+  return {
+    nodes := ← within "nodes" (decodeBindings (← field j "nodes"))
+    edges := ← within "edges" (decodeBindings (← field j "edges"))
+    freshNodes := ← within "fresh_nodes" (decodeBindings (← field j "fresh_nodes"))
+    freshEdges := ← within "fresh_edges" (decodeBindings (← field j "fresh_edges")) }
+
+/-- Payload evidence `{digest: bytes}`: the bytes offered for each commitment. -/
+def decodeEvidence (j : Json) : Except String (List (Digest × Bytes)) := do
+  match j with
+  | .obj kvs =>
+    kvs.toList.mapM fun (digest, bytes) => do
+      let key ← bytesOfHex digest
+      if hexOfBytes key != digest then
+        throw s!"evidence key \"{digest}\" is not lowercase hex"
+      return (digest, ← bytesOfHex (← string bytes))
+  | _ => throw "expected an object from digest to payload"
+
 /-- One operation. Its `expect` field, if any, is the kernel's and is ignored. -/
-def decodeOp (j : Json) : Except String Op := do
+def decodeOp (j : Json) : Except String SysOp := do
   match ← string (← field j "op") with
   | "activate" =>
     let id ← decodeActivationId (← field j "id")
     let trigger ← decodeTrigger (← field j "trigger")
     let result ← bytesOfHex (← string (← field j "result"))
     let emissions ← (← array (← field j "emissions")).mapM decodeEmission
-    return .activate id ⟨trigger, result, emissions⟩
+    return .step (.activate id ⟨trigger, result, emissions⟩)
   | "transfer" =>
-    return .transfer (← decodePackageId (← field j "package")) (← string (← field j "edge"))
-      (← bytesOfHex (← string (← field j "payload")))
+    return .step (.transfer (← decodePackageId (← field j "package"))
+      (← string (← field j "edge")) (← bytesOfHex (← string (← field j "payload"))))
   | "retire" =>
     let evidence ← match ← field j "evidence" with
       | .null => pure none
       | a => pure (some (← decodeActivationId a))
-    return .retire (← decodePackageId (← field j "package")) evidence
+    return .step (.retire (← decodePackageId (← field j "package")) evidence)
+  | "rewrite" =>
+    let production ← string (← field j "production")
+    let matching ← within "match" (decodeMatch (← field j "match"))
+    let evidence ← within "evidence" (decodeEvidence (← field j "evidence"))
+    return .rewrite ⟨production, matching⟩ evidence
+  | "extend" =>
+    let schema ← within "schema" (decodeSchema (← field j "schema"))
+    let contracts ← within "contracts" do (← array (← field j "contracts")).mapM decodeContract
+    return .extend schema contracts
   | other => throw s!"unknown op \"{other}\""
 
-/-- The payloads an operation commits to or checks against a commitment. -/
-def opPayloads : Op → List Bytes
-  | .activate _ proposal => proposal.emissions.map (·.payload)
-  | .transfer _ _ payload => [payload]
-  | .retire _ _ => []
+/-- The payloads an operation commits to, checks against a commitment, or offers as
+evidence. -/
+def opPayloads : SysOp → List Bytes
+  | .step (.activate _ proposal) => proposal.emissions.map (·.payload)
+  | .step (.transfer _ _ payload) => [payload]
+  | .step (.retire _ _) => []
+  | .rewrite _ evidence => evidence.map (·.2)
+  | .extend _ _ => []
+
+/-- The contracts an operation registers. -/
+def opContracts : SysOp → List Contract
+  | .extend _ contracts => contracts
+  | _ => []
 
 /-! ## Trace -/
 
-def traceFormat : String := "ontography-lean-trace/1"
+def traceFormat : String := "ontography-lean-trace/2"
 
 def decodeDigests (j : Json) : Except String (List (String × Digest)) := do
   match j with
@@ -199,13 +265,21 @@ def decodeTrace (input : String) : Except String Trace := do
   let format ← within "format" (string (← field j "format"))
   if format != traceFormat then
     throw s!"unsupported trace format \"{format}\", expected \"{traceFormat}\""
-  let (definition, validators) ← within "definition" (decodeDefinition (← field j "definition"))
+  let validators ← within "validators" (decodeValidators (← field j "validators"))
   let digests ← within "digests" (decodeDigests (← field j "digests"))
+  let grammar ← within "grammar" do (← array (← field j "grammar")).mapM decodeProduction
+  let definition ← within "definition" (decodeDefinition (← field j "definition"))
   let ops ← (← array (← field j "ops")).zipIdx.mapM fun (op, i) => within s!"op {i}" (decodeOp op)
+  for c in definition.contracts do
+    if (validators.lookup c.id).isNone then
+      throw s!"contract {c.id} has no validator"
   for (op, i) in ops.zipIdx do
     for payload in opPayloads op do
       if (digests.lookup (hexOfBytes payload)).isNone then
         throw s!"op {i}: payload {hexOfBytes payload} has no entry in the digest table"
-  return { definition, validators, digests, ops }
+    for c in opContracts op do
+      if (validators.lookup c.id).isNone then
+        throw s!"op {i}: contract {c.id} has no validator"
+  return { validators, digests, grammar, definition, ops }
 
 end Oracle

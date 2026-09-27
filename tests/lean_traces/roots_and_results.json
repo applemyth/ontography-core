@@ -1,11 +1,13 @@
 {
-  "format": "ontography-lean-trace/1",
+  "format": "ontography-lean-trace/2",
   "name": "roots_and_results",
+  "validators": {"any": "accept_all", "even": "first_byte_even"},
+  "grammar": [],
   "definition": {
     "schema": {"node_types": ["n"], "object_types": ["t"], "tags": ["run", "audit", "admin"]},
     "contracts": [
-      {"id": "any", "object_type": "t", "validator": "accept_all"},
-      {"id": "even", "object_type": "t", "validator": "first_byte_even"}
+      {"id": "any", "object_type": "t"},
+      {"id": "even", "object_type": "t"}
     ],
     "nodes": ["a", "b"],
     "edges": [{"id": "ab", "source": "a", "target": "b"}],

@@ -1,13 +1,15 @@
 {
-  "format": "ontography-lean-trace/1",
+  "format": "ontography-lean-trace/2",
   "name": "transfers",
+  "validators": {"any": "accept_all", "none": "reject_all", "even": "first_byte_even", "ok": {"bytes_equal": "6f6b"}},
+  "grammar": [],
   "definition": {
     "schema": {"node_types": ["n"], "object_types": ["t", "u"], "tags": ["run", "audit"]},
     "contracts": [
-      {"id": "any", "object_type": "t", "validator": "accept_all"},
-      {"id": "none", "object_type": "t", "validator": "reject_all"},
-      {"id": "even", "object_type": "t", "validator": "first_byte_even"},
-      {"id": "ok", "object_type": "u", "validator": {"bytes_equal": "6f6b"}}
+      {"id": "any", "object_type": "t"},
+      {"id": "none", "object_type": "t"},
+      {"id": "even", "object_type": "t"},
+      {"id": "ok", "object_type": "u"}
     ],
     "nodes": ["a", "b", "x"],
     "edges": [

@@ -1,9 +1,11 @@
 {
-  "format": "ontography-lean-trace/1",
+  "format": "ontography-lean-trace/2",
   "name": "joins",
+  "validators": {"any": "accept_all"},
+  "grammar": [],
   "definition": {
     "schema": {"node_types": ["n"], "object_types": ["t"], "tags": ["p", "q"]},
-    "contracts": [{"id": "any", "object_type": "t", "validator": "accept_all"}],
+    "contracts": [{"id": "any", "object_type": "t"}],
     "nodes": ["a", "j", "b"],
     "edges": [
       {"id": "aj1", "source": "a", "target": "j"},

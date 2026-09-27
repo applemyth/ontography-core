@@ -10,7 +10,7 @@ name = "Ontography"
 name = "Oracle"
 globs = ["Oracle.+"]
 
-# Replays a kernel trace with the model's `step`; see TRACE_FORMAT.md.
+# Replays a kernel trace with the model's `sysStep`; see TRACE_FORMAT.md.
 [[lean_exe]]
 name = "oracle"
 root = "Oracle.Main"

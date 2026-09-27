@@ -4,14 +4,14 @@ import Oracle.Trace
 /-!
 # The trace oracle
 
-Reads one trace (`TRACE_FORMAT.md`) from standard input and replays its
-operations with the model's `step`, starting from `State.initial`. After each
-operation it writes one line of JSON: the step index, whether `step` accepted
-the operation, and the canonical encoding of the resulting state, which is
-the predecessor when the operation is rejected.
+Reads one trace (`TRACE_FORMAT.md`) from standard input and replays its operations with the
+model's `sysStep`, starting from the trace's definition and `State.initial`, and threading the
+definition through rewrites and extensions. After each operation it writes one line of JSON:
+the step index, whether `sysStep` accepted the operation, and the canonical encoding of the
+resulting definition and state, which are the predecessor's when the operation is rejected.
 
-The oracle adds no rule of its own: the validators and the commitment
-function come from the trace, and every decision is `step`'s.
+The oracle adds no rule of its own: the validators, the commitment function, and the grammar
+come from the trace, and every decision is `sysStep`'s.
 
 Exit status: 0 after replaying every operation, 2 for a malformed trace.
 -/
@@ -27,16 +27,17 @@ def main : IO UInt32 := do
     return 2
   | .ok trace =>
     let stdout ← IO.getStdout
+    let mut definition := trace.definition
     let mut state := State.initial trace.definition
     for (op, index) in trace.ops.zipIdx do
       let (accepted, next) :=
-        match step trace.accepts trace.commit trace.definition state op with
+        match sysStep trace.accepts trace.commit trace.grammar definition state op with
         | some next => (true, next)
-        | none => (false, state)
-      state := next
+        | none => (false, (definition, state))
+      (definition, state) := next
       stdout.putStrLn <| Json.compress <| Json.mkObj [
         ("step", Oracle.jnat index),
         ("accepted", .bool accepted),
-        ("state", Oracle.encodeState state)]
+        ("state", Oracle.encodeState definition state)]
     stdout.flush
     return 0

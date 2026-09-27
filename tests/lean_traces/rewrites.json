@@ -1,0 +1,198 @@
+{
+  "format": "ontography-lean-trace/2",
+  "name": "rewrites",
+  "validators": {"c": "accept_all", "d": "reject_all", "late": "accept_all"},
+  "grammar": [
+    {"id": "grow",
+     "left": {
+       "nodes": ["X", "Y"],
+       "edges": [{"id": "E", "source": "X", "target": "Y"}],
+       "node_definitions": [
+         {"node": "X", "types": ["m", "n", "m"], "result_contract": "c", "ingress": "any"},
+         {"node": "Y", "types": ["n"], "result_contract": "c", "ingress": "all"}
+       ],
+       "edge_definitions": [
+         {"edge": "E", "types": ["flow"], "source_requirements": ["n"], "target_requirements": [], "package_contract": "c", "tags": ["run", "other"], "authority_match": "any_of"}
+       ],
+       "transitions": [
+         {"node": "X", "source": ["run"], "target": ["other", "run"]},
+         {"node": "X", "source": ["run", "other"], "target": ["run"]},
+         {"node": "X", "source": ["run"], "target": ["run", "other", "run"]}
+       ],
+       "roots": [{"node": "X", "ceiling": ["run", "other"]}]},
+     "interface_nodes": ["X", "Y"],
+     "interface_edges": ["E"],
+     "right": {
+       "nodes": ["Z", "Y", "X"],
+       "edges": [{"id": "F", "source": "X", "target": "Z"}, {"id": "E", "source": "X", "target": "Y"}],
+       "node_definitions": [
+         {"node": "X", "types": ["n", "m"], "result_contract": "c", "ingress": "any"},
+         {"node": "Y", "types": ["n", "n"], "result_contract": "c", "ingress": "all"},
+         {"node": "Z", "types": ["n"], "result_contract": "c", "ingress": "all"}
+       ],
+       "edge_definitions": [
+         {"edge": "E", "types": ["flow", "flow"], "source_requirements": ["n"], "target_requirements": [], "package_contract": "c", "tags": ["other", "run"], "authority_match": "any_of"},
+         {"edge": "F", "types": ["flow"], "source_requirements": ["n"], "target_requirements": [], "package_contract": "c", "tags": ["run", "other"], "authority_match": "any_of"}
+       ],
+       "transitions": [
+         {"node": "X", "source": ["other", "run"], "target": ["run"]},
+         {"node": "X", "source": ["run"], "target": ["run", "other"]}
+       ],
+       "roots": [{"node": "X", "ceiling": ["other", "run", "other"]}]}},
+    {"id": "seal",
+     "left": {
+       "nodes": ["X", "Y"],
+       "edges": [{"id": "E", "source": "X", "target": "Y"}],
+       "node_definitions": [
+         {"node": "X", "types": ["n", "m"], "result_contract": "c", "ingress": "any"},
+         {"node": "Y", "types": ["n"], "result_contract": "c", "ingress": "all"}
+       ],
+       "edge_definitions": [
+         {"edge": "E", "types": ["flow"], "source_requirements": ["n"], "target_requirements": [], "package_contract": "c", "tags": ["run", "other"], "authority_match": "any_of"}
+       ],
+       "transitions": [
+         {"node": "X", "source": ["run"], "target": ["run", "other"]},
+         {"node": "X", "source": ["run", "other"], "target": ["run"]}
+       ],
+       "roots": [{"node": "X", "ceiling": ["run", "other"]}]},
+     "interface_nodes": ["X", "Y"],
+     "interface_edges": ["E"],
+     "right": {
+       "nodes": ["X", "Y"],
+       "edges": [{"id": "E", "source": "X", "target": "Y"}, {"id": "S", "source": "X", "target": "Y"}],
+       "node_definitions": [
+         {"node": "X", "types": ["n", "m"], "result_contract": "c", "ingress": "any"},
+         {"node": "Y", "types": ["n"], "result_contract": "c", "ingress": "all"}
+       ],
+       "edge_definitions": [
+         {"edge": "E", "types": ["flow"], "source_requirements": ["n"], "target_requirements": [], "package_contract": "c", "tags": ["run", "other"], "authority_match": "any_of"},
+         {"edge": "S", "types": ["seal"], "source_requirements": [], "target_requirements": ["n"], "package_contract": "d", "tags": ["run"], "authority_match": "all_of"}
+       ],
+       "transitions": [
+         {"node": "X", "source": ["run"], "target": ["run", "other"]},
+         {"node": "X", "source": ["run", "other"], "target": ["run"]}
+       ],
+       "roots": [{"node": "X", "ceiling": ["run", "other"]}]}},
+    {"id": "relabel",
+     "left": {
+       "nodes": ["X", "Y"],
+       "edges": [{"id": "E", "source": "X", "target": "Y"}],
+       "node_definitions": [
+         {"node": "X", "types": ["n", "m"], "result_contract": "c", "ingress": "any"},
+         {"node": "Y", "types": ["n"], "result_contract": "c", "ingress": "all"}
+       ],
+       "edge_definitions": [
+         {"edge": "E", "types": ["flow"], "source_requirements": ["n"], "target_requirements": [], "package_contract": "c", "tags": ["run", "other"], "authority_match": "any_of"}
+       ],
+       "transitions": [
+         {"node": "X", "source": ["run"], "target": ["run", "other"]},
+         {"node": "X", "source": ["run", "other"], "target": ["run"]}
+       ],
+       "roots": [{"node": "X", "ceiling": ["run", "other"]}]},
+     "interface_nodes": ["X", "Y"],
+     "interface_edges": ["E"],
+     "right": {
+       "nodes": ["X", "Y"],
+       "edges": [{"id": "E", "source": "X", "target": "Y"}],
+       "node_definitions": [
+         {"node": "X", "types": ["n", "m"], "result_contract": "c", "ingress": "any"},
+         {"node": "Y", "types": ["n"], "result_contract": "c", "ingress": "all"}
+       ],
+       "edge_definitions": [
+         {"edge": "E", "types": ["flow"], "source_requirements": ["n"], "target_requirements": [], "package_contract": "d", "tags": ["run", "other"], "authority_match": "any_of"}
+       ],
+       "transitions": [
+         {"node": "X", "source": ["run"], "target": ["run", "other"]},
+         {"node": "X", "source": ["run", "other"], "target": ["run"]}
+       ],
+       "roots": [{"node": "X", "ceiling": ["run", "other"]}]}},
+    {"id": "late",
+     "left": {
+       "nodes": ["X"],
+       "edges": [],
+       "node_definitions": [{"node": "X", "types": ["n", "m"], "result_contract": "c", "ingress": "any"}],
+       "edge_definitions": [],
+       "transitions": [
+         {"node": "X", "source": ["run"], "target": ["run", "other"]},
+         {"node": "X", "source": ["run", "other"], "target": ["run"]}
+       ],
+       "roots": [{"node": "X", "ceiling": ["run", "other"]}]},
+     "interface_nodes": ["X"],
+     "interface_edges": [],
+     "right": {
+       "nodes": ["X"],
+       "edges": [{"id": "W", "source": "X", "target": "X"}],
+       "node_definitions": [{"node": "X", "types": ["n", "m"], "result_contract": "c", "ingress": "any"}],
+       "edge_definitions": [
+         {"edge": "W", "types": ["loop"], "source_requirements": ["n"], "target_requirements": ["m"], "package_contract": "late", "tags": ["other"], "authority_match": "any_of"}
+       ],
+       "transitions": [
+         {"node": "X", "source": ["run"], "target": ["run", "other"]},
+         {"node": "X", "source": ["run", "other"], "target": ["run"]}
+       ],
+       "roots": [{"node": "X", "ceiling": ["run", "other"]}]}}
+  ],
+  "definition": {
+    "schema": {"node_types": ["n", "m"], "object_types": ["t"], "tags": ["run", "other"]},
+    "contracts": [{"id": "c", "object_type": "t"}, {"id": "d", "object_type": "t"}],
+    "nodes": ["A", "B"],
+    "edges": [{"id": "ab", "source": "A", "target": "B"}],
+    "node_definitions": [
+      {"node": "A", "types": ["n", "m"], "result_contract": "c", "ingress": "any"},
+      {"node": "B", "types": ["n"], "result_contract": "c", "ingress": "all"}
+    ],
+    "edge_definitions": [
+      {"edge": "ab", "types": ["flow"], "source_requirements": ["n"], "target_requirements": [], "package_contract": "c", "tags": ["run", "other"], "authority_match": "any_of"}
+    ],
+    "transitions": [
+      {"node": "A", "source": ["run"], "target": ["run", "other"]},
+      {"node": "A", "source": ["other", "run"], "target": ["run"]}
+    ],
+    "roots": [{"node": "A", "ceiling": ["other", "run"]}]
+  },
+  "digests": {
+    "01": "131ab68174b39cdfd7bf4d2fb395892b5ef29433c9885a8300504f23f6a0781b",
+    "02": "84824b7975951bccacbfaa4db8b69d261f636165ec2dafee7705612e8b91e60e"
+  },
+  "ops": [
+    {"op": "activate", "id": "1", "trigger": {"orig": {"node": "A", "authority": ["run"]}}, "result": "", "emissions": [
+      {"destination": {"delivered": "ab"}, "authority": "carry", "payload": "01"},
+      {"destination": {"outbound": "t"}, "authority": "carry", "payload": "02"}
+    ], "expect": {"accepted": true}},
+    {"op": "rewrite", "production": "grow",
+     "match": {"nodes": [["X", "A"], ["Y", "B"]], "edges": [["E", "ab"]], "fresh_nodes": [["Z", "C"]], "fresh_edges": [["F", "ac"]]},
+     "evidence": {}, "expect": {"accepted": false}},
+    {"op": "rewrite", "production": "grow",
+     "match": {"nodes": [["X", "A"], ["Y", "B"]], "edges": [["E", "ab"]], "fresh_nodes": [["Z", "C"]], "fresh_edges": [["F", "ac"]]},
+     "evidence": {"84824b7975951bccacbfaa4db8b69d261f636165ec2dafee7705612e8b91e60e": "01"}, "expect": {"accepted": false}},
+    {"op": "rewrite", "production": "grow",
+     "match": {"nodes": [["X", "A"], ["Y", "B"]], "edges": [["E", "ab"]], "fresh_nodes": [["Z", "C"]], "fresh_edges": [["F", "ac"]]},
+     "evidence": {"84824b7975951bccacbfaa4db8b69d261f636165ec2dafee7705612e8b91e60e": "02"}, "expect": {"accepted": true}},
+    {"op": "rewrite", "production": "grow",
+     "match": {"nodes": [["X", "A"], ["Y", "B"]], "edges": [["E", "ab"]], "fresh_nodes": [["Z", "C"]], "fresh_edges": [["F", "ac2"]]},
+     "evidence": {"84824b7975951bccacbfaa4db8b69d261f636165ec2dafee7705612e8b91e60e": "02"}, "expect": {"accepted": false}},
+    {"op": "rewrite", "production": "seal",
+     "match": {"nodes": [["X", "A"], ["Y", "B"]], "edges": [["E", "ab"]], "fresh_nodes": [], "fresh_edges": [["S", "ab_seal"]]},
+     "evidence": {"84824b7975951bccacbfaa4db8b69d261f636165ec2dafee7705612e8b91e60e": "02"}, "expect": {"accepted": true}},
+    {"op": "rewrite", "production": "relabel",
+     "match": {"nodes": [["X", "A"], ["Y", "B"]], "edges": [["E", "ab"]], "fresh_nodes": [], "fresh_edges": []},
+     "evidence": {"84824b7975951bccacbfaa4db8b69d261f636165ec2dafee7705612e8b91e60e": "02"}, "expect": {"accepted": false}},
+    {"op": "rewrite", "production": "late",
+     "match": {"nodes": [["X", "A"]], "edges": [], "fresh_nodes": [], "fresh_edges": [["W", "aa"]]},
+     "evidence": {"84824b7975951bccacbfaa4db8b69d261f636165ec2dafee7705612e8b91e60e": "02"}, "expect": {"accepted": false}},
+    {"op": "extend",
+     "schema": {"node_types": ["m", "n"], "object_types": ["t"], "tags": ["other", "run", "run"]},
+     "contracts": [{"id": "late", "object_type": "t"}, {"id": "d", "object_type": "t"}, {"id": "c", "object_type": "t"}],
+     "expect": {"accepted": true}},
+    {"op": "rewrite", "production": "late",
+     "match": {"nodes": [["X", "A"]], "edges": [], "fresh_nodes": [], "fresh_edges": [["W", "aa"]]},
+     "evidence": {"84824b7975951bccacbfaa4db8b69d261f636165ec2dafee7705612e8b91e60e": "02"}, "expect": {"accepted": true}},
+    {"op": "extend",
+     "schema": {"node_types": ["n", "m"], "object_types": ["t"], "tags": ["run", "other"]},
+     "contracts": [{"id": "c", "object_type": "t"}, {"id": "d", "object_type": "t"}, {"id": "late", "object_type": "t"}],
+     "expect": {"accepted": false}},
+    {"op": "activate", "id": "2", "trigger": {"pkgs": [["1", 0]]}, "result": "", "emissions": [], "expect": {"accepted": false}},
+    {"op": "transfer", "package": ["1", 1], "edge": "ac", "payload": "02", "expect": {"accepted": true}},
+    {"op": "activate", "id": "3", "trigger": {"pkgs": [["1", 1]]}, "result": "", "emissions": [], "expect": {"accepted": true}}
+  ]
+}

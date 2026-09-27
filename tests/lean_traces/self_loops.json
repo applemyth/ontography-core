@@ -1,9 +1,11 @@
 {
-  "format": "ontography-lean-trace/1",
+  "format": "ontography-lean-trace/2",
   "name": "self_loops",
+  "validators": {"any": "accept_all"},
+  "grammar": [],
   "definition": {
     "schema": {"node_types": ["n"], "object_types": ["t"], "tags": ["p"]},
-    "contracts": [{"id": "any", "object_type": "t", "validator": "accept_all"}],
+    "contracts": [{"id": "any", "object_type": "t"}],
     "nodes": ["s", "m"],
     "edges": [
       {"id": "sm", "source": "s", "target": "m"},
