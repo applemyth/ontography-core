@@ -3,6 +3,7 @@ import Ontography.Runs
 import Ontography.Checkpoint
 import Ontography.Replay
 import Ontography.Proofs.Runs
+import Ontography.Proofs.Delivery
 import Ontography.Proofs.Replay
 import Ontography.Proofs.Checkpoint
 import Ontography.Proofs.Commutation
@@ -102,8 +103,8 @@ theorem sysStep_delivery {op : SysOp} (h : sysStep accepts H grammar Δ S op = s
     {p : PackageId} {r' : PackageRecord} {d : Delivery} (hr' : S'.packages p = some r')
     (hd : r'.delivery = some d) :
     (∃ r, S.packages p = some r ∧ r.delivery = some d) ∨
-      (⟨d.edge, r'.producerNode, d.receiver⟩ : Edge) ∈ Δ.edges := by
-  sorry
+      (⟨d.edge, r'.producerNode, d.receiver⟩ : Edge) ∈ Δ.edges :=
+  Proofs.sysStep_delivery h hr' hd
 
 end
 
@@ -165,8 +166,8 @@ builds, reached by activations alone from payloads the evidence returns. With
 theorem replay_sound {h : List (ActivationId × Activation)} {evidence : Digest → Option Bytes}
     (hreplay : replay accepts H Δ h evidence = some S) :
     S.history = h ∧ ∃ payloads, ActivationRun accepts H Δ S payloads ∧
-      ∀ b ∈ payloads, evidence (H b) = some b := by
-  sorry
+      ∀ b ∈ payloads, evidence (H b) = some b :=
+  Proofs.replay_sound hreplay
 
 /-- A reachable workflow whose revision counts only its activations was reached by
 activations alone, under its current definition. -/

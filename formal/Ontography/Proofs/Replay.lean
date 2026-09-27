@@ -19,7 +19,9 @@ proposal admits the original outputs and records, and the accepted activation is
 `replay_history` applies this to each pre-state of the run.
 
 **Soundness.** Each accepted entry is an activation step whose accepted activation is the
-entry, at an identity not yet accepted, so it extends the history by exactly that entry.
+entry, at an identity not yet accepted, so it extends the history by exactly that entry. Its
+proposal's payloads are evidence bytes matching their commitments, so the evidence returns
+each of them, and the replayed state is reached by activations alone from such payloads.
 
 **Revision.** `revision - |A|` never decreases along a run, and every transition other than
 an activation raises it, so a state whose revision counts only its activations was reached
@@ -342,40 +344,67 @@ theorem domInv_accept {S : State} {a : ActivationId} {act : Activation}
   · rw [Common.update_of_ne hb, h b]
     simp [hb]
 
+/-- Every payload of a rebuilt proposal is evidence bytes matching its commitment, so the
+evidence returns it for its own commitment. -/
+theorem replayProposal_evidence {act : Activation} {α : Authority}
+    {evidence : Digest → Option Bytes} {prop : Proposal}
+    (h : act.replayProposal α H evidence = some prop) :
+    ∀ em ∈ prop.emissions, evidence (H em.payload) = some em.payload := by
+  rw [replayProposal_eq] at h
+  simp only [bind, Option.bind_eq_some_iff, pure, Option.some.injEq] at h
+  obtain ⟨ems, hems, rfl⟩ := h
+  intro em hem
+  obtain ⟨o, -, ho⟩ := (Activation.mapM_some hems).2 em hem
+  simp only [replayOutput, bind, Option.bind_eq_some_iff, Common.guard_eq_some, exists_const,
+    pure, Option.some.injEq] at ho
+  obtain ⟨bytes, hbytes, hH, rfl⟩ := ho
+  show evidence (H bytes) = some bytes
+  rw [hH, hbytes]
+
 /-- An accepted replay entry is an activation step at a fresh identity that accepts the entry
-itself. -/
+itself, from a proposal whose payloads the evidence returns. -/
 theorem replayStep_inv {S S' : State} {entry : ActivationId × Activation}
     {evidence : Digest → Option Bytes}
     (h : replayStep accepts H Δ evidence S entry = some S') :
     ∃ prop recs, activate accepts H Δ S entry.1 prop = some S' ∧
+      (∀ em ∈ prop.emissions, evidence (H em.payload) = some em.payload) ∧
       S.activations entry.1 = none ∧ S' = S.accept entry.1 entry.2 recs := by
   simp only [replayStep, bind, Option.bind_eq_some_iff, Common.guard_eq_some, exists_const,
     pure, Option.some.injEq] at h
-  obtain ⟨-, -, prop, -, S'', hact, hrec, rfl⟩ := h
+  obtain ⟨_, -, prop, hprop, S'', hact, hrec, rfl⟩ := h
   obtain ⟨act, -, recs, hfresh, -, rfl⟩ := Common.activate_eq_some hact
   obtain rfl : act = entry.2 := by simpa [State.accept, update] using hrec
-  exact ⟨prop, recs, hact, hfresh, rfl⟩
+  exact ⟨prop, recs, hact, replayProposal_evidence hprop, hfresh, rfl⟩
 
-/-- Replaying entries from a reachable state appends them to its history, by activations. -/
+/-- Replaying entries from a state reached by activations from payloads the evidence returns
+appends them to its history, by more such activations. -/
 theorem foldlM_sound {evidence : Digest → Option Bytes} :
-    ∀ {h : List (ActivationId × Activation)} {R S : State}, DomInv R →
-      Reachable accepts H Δ R → h.foldlM (replayStep accepts H Δ evidence) R = some S →
-      S.history = R.history ++ h ∧ Reachable accepts H Δ S
-  | [], R, S, _, hR, hfold => by
+    ∀ {h : List (ActivationId × Activation)} {R S : State} {payloads : List Bytes}, DomInv R →
+      ActivationRun accepts H Δ R payloads → (∀ b ∈ payloads, evidence (H b) = some b) →
+      h.foldlM (replayStep accepts H Δ evidence) R = some S →
+      S.history = R.history ++ h ∧ ∃ payloads', ActivationRun accepts H Δ S payloads' ∧
+        ∀ b ∈ payloads', evidence (H b) = some b
+  | [], R, S, payloads, _, hrun, hev, hfold => by
     simp only [List.foldlM_nil, pure, Option.some.injEq] at hfold
     subst hfold
-    exact ⟨by simp, hR⟩
-  | x :: xs, R, S, hdom, hR, hfold => by
+    exact ⟨by simp, payloads, hrun, hev⟩
+  | x :: xs, R, S, payloads, hdom, hrun, hev, hfold => by
     simp only [List.foldlM_cons, bind, Option.bind_eq_some_iff] at hfold
     obtain ⟨R₁, h₁, hfold'⟩ := hfold
-    obtain ⟨prop, recs, hact, hfresh, rfl⟩ := replayStep_inv h₁
+    obtain ⟨prop, recs, hact, hprop, hfresh, rfl⟩ := replayStep_inv h₁
     have hnot : x.1 ∉ R.activationIds := fun hm => by
       have := (hdom x.1).2 hm
       rw [hfresh] at this
       cases this
-    obtain ⟨hhist, hreach⟩ :=
-      foldlM_sound (domInv_accept hdom) (.next (.activate x.1 prop) hR hact) hfold'
-    refine ⟨?_, hreach⟩
+    -- The entry's payloads join the run's, and the evidence returns each of them.
+    have hev' : ∀ b ∈ payloads ++ prop.emissions.map (·.payload), evidence (H b) = some b := by
+      intro b hb
+      rcases List.mem_append.1 hb with hb | hb
+      · exact hev b hb
+      · obtain ⟨em, hem, rfl⟩ := List.mem_map.1 hb
+        exact hprop em hem
+    obtain ⟨hhist, hrun'⟩ := foldlM_sound (domInv_accept hdom) (.activate hrun hact) hev' hfold'
+    refine ⟨?_, hrun'⟩
     rw [hhist, history_accept hnot]
     simp
 
@@ -678,14 +707,16 @@ theorem replay_history (hΔ : Δ.Admitted) {payloads : List Bytes}
     simpa using hreplay S hfresh fun _ _ => rfl
 
 /-- Replay accepts only faithful histories: whatever it accepts is the history of the state it
-builds, which is reachable. -/
+builds, reached by activations alone from payloads the evidence returns. With
+`replay_history`, replay accepts exactly those histories. -/
 theorem replay_sound {h : List (ActivationId × Activation)} {evidence : Digest → Option Bytes}
     (hreplay : replay accepts H Δ h evidence = some S) :
-    S.history = h ∧ Reachable accepts H Δ S := by
+    S.history = h ∧ ∃ payloads, ActivationRun accepts H Δ S payloads ∧
+      ∀ b ∈ payloads, evidence (H b) = some b := by
   rw [Replay.replay_eq] at hreplay
-  obtain ⟨hhist, hreach⟩ :=
-    Replay.foldlM_sound (fun a => by simp [State.initial]) .initial hreplay
-  exact ⟨by simpa [State.history, State.initial] using hhist, hreach⟩
+  obtain ⟨hhist, hrun⟩ := Replay.foldlM_sound (fun a => by simp [State.initial]) .initial
+    (fun _ hb => nomatch hb) hreplay
+  exact ⟨by simpa [State.history, State.initial] using hhist, hrun⟩
 
 /-- A reachable workflow whose revision counts only its activations was reached by
 activations alone, under its current definition. -/
@@ -780,7 +811,8 @@ theorem replay_causal (hΔ : Δ.Admitted) {payloads : List Bytes}
   obtain ⟨R, hfold, hsim⟩ := Replay.sim_fold hS hinv hmem hnodup hprefix h [] (State.initial Δ)
     rfl hsim₀ fun _ _ hc => nomatch hc
   rw [← Replay.replay_eq] at hfold
-  have hR := wf_of_reachable hΔ (replay_sound hfold).2
+  obtain ⟨-, _, hrunR, -⟩ := replay_sound hfold
+  have hR := wf_of_reachable hΔ (Replay.reachable_of_run hrunR)
   have hacts : R.activations = S.activations := by
     funext a
     rw [hsim.activations]
