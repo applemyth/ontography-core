@@ -63,4 +63,31 @@ theorem sysStep_fresh {op : SysOp} (h : sysStep accepts H grammar Δ S op = some
       ∀ e ∈ Δ'.edges, e ∈ Δ.edges ∨ e.id ∉ S.usedEdges := by
   sorry
 
+/-- The rewrite rule, exactly (§5): the registered production's admitted replacement becomes
+the definition; each live package is kept or retired at the successor revision by the cleanup
+table; no other record changes; and the lifetime records grow by the fresh allocations. -/
+theorem rewrite_spec (hS : WF Δ S) {req : RewriteRequest} {evidence : List (Digest × Bytes)}
+    (h : rewrite accepts H grammar Δ S req evidence = some (Δ', S')) :
+    ∃ pr rep, grammar.find? (·.id == req.production) = some pr ∧
+      structural? Δ S pr req.matching = some rep ∧ Δ' = rep.next ∧
+      S'.activations = S.activations ∧ S'.activationIds = S.activationIds ∧
+      S'.packageIds = S.packageIds ∧ S'.usedNodes = S.usedNodes ++ rep.freshNodes ∧
+      S'.edgeLog = S.edgeLog ++ rep.freshEdges ∧
+      S'.changeLog = S.changeLog ++ [S.revision + 1] ∧ S'.revision = S.revision + 1 ∧
+      (∀ q, S.packages q = none → S'.packages q = none) ∧
+      (∀ q r, S.packages q = some r → r.status ≠ .live → S'.packages q = some r) ∧
+      ∀ q r, S.packages q = some r → r.status = .live →
+        ∃ fate, cleanup? accepts H Δ rep.next rep.deleted evidence r = some fate ∧
+          S'.packages q = some (match fate with
+            | none => r
+            | some reason => { r with status := .retired ⟨reason, S.revision + 1, none⟩ }) := by
+  sorry
+
+/-- The extension rule, exactly (§6): only the vocabulary and the counters change. -/
+theorem extend_spec {schema : Schema} {contracts : List Contract}
+    (h : extend Δ S schema contracts = some (Δ', S')) :
+    Δ' = { Δ with schema := schema, contracts := contracts } ∧
+      S' = { S with changeLog := S.changeLog ++ [S.revision + 1], revision := S.revision + 1 } := by
+  sorry
+
 end Ontography
