@@ -13,17 +13,18 @@ The checks are exactly the invariants. Every well-formed state passes them, and 
 checkpoint that passes is recorded by some well-formed state, one that may differ in its
 acceptance order and ghost logs. A checkpoint cannot record the incidence of an edge that
 every receipt names consistently, but every such incidence is consistent with some
-well-formed history, so restoration establishes the integrity of a trusted store, not its
+well-formed state, so restoration establishes the integrity of a trusted store, not its
 reachability.
 -/
 
 namespace Ontography
 
-/-- Two states record the same checkpoint: they differ at most in the incidence and change
-logs, beyond the identities and counts those logs determine. -/
+/-- Two states record the same checkpoint: they differ at most in the order of their identity
+lists and in the incidence and change logs, beyond the identities and counts those logs
+determine. A kernel checkpoint holds maps and sets, which record no order. -/
 def SameCheckpoint (S S' : State) : Prop :=
   S.activations = S'.activations ∧ S.packages = S'.packages ∧
-    S.activationIds = S'.activationIds ∧ S.packageIds = S'.packageIds ∧
+    S.activationIds.Perm S'.activationIds ∧ S.packageIds.Perm S'.packageIds ∧
     S.usedNodes = S'.usedNodes ∧ S.usedEdges = S'.usedEdges ∧
     S.definitionChanges = S'.definitionChanges ∧ S.revision = S'.revision
 

@@ -55,21 +55,49 @@ variable {Δ : Definition} {S : State}
 /-- The checks read only the checkpoint. -/
 theorem checkpointValid_congr {S' : State} (hsame : SameCheckpoint S S')
     (h : CheckpointValid Δ S) : CheckpointValid Δ S' := by
-  obtain ⟨activations, packages, activationIds, packageIds, usedNodes, edgeLog, changeLog,
-    revision⟩ := S
-  obtain ⟨activations', packages', activationIds', packageIds', usedNodes', edgeLog',
-    changeLog', revision'⟩ := S'
-  obtain ⟨rfl, rfl, rfl, rfl, rfl, hedges, hchanges, rfl⟩ := hsame
-  -- The states now differ only in their logs. `output?`, the revision-accounting counts, and
-  -- `DependsOn` read neither, so only the checks that read the used edge identities or the
-  -- definition-change count need rewriting.
-  exact { h with
-    used_nonempty := hedges ▸ h.used_nonempty
-    current_used := hedges ▸ h.current_used
-    used_edges := hedges ▸ h.used_edges
-    delivery_used := hedges ▸ h.delivery_used
-    structural_stamps := hchanges ▸ h.structural_stamps
-    revision := hchanges ▸ h.revision }
+  obtain ⟨hA, hP, hIds, hPIds, hN, hE, hD, hR⟩ := hsame
+  -- `DependsOn`, `output?`, and the revision-accounting counts read only the maps, and the
+  -- counts are invariant under reordering the package identities.
+  have hDep : DependsOn S = DependsOn S' := by
+    funext b a; simp only [DependsOn, hP]
+  have hT : S.explicitTransfers = S'.explicitTransfers := by
+    unfold State.explicitTransfers
+    have : S.isExplicitTransfer = S'.isExplicitTransfer := by
+      funext p; simp only [State.isExplicitTransfer, State.output?, hA, hP]
+    rw [this]; exact hPIds.countP_eq _
+  have hX : S.explicitRetirements = S'.explicitRetirements := by
+    unfold State.explicitRetirements
+    have : S.isExplicitRetirement = S'.isExplicitRetirement := by
+      funext p; simp only [State.isExplicitRetirement, hP]
+    rw [this]; exact hPIds.countP_eq _
+  have hO : S.output? = S'.output? := by funext p; simp only [State.output?, hA]
+  exact {
+    activationIds_nodup := hIds.nodup_iff.mp h.activationIds_nodup
+    activations_dom := fun a => by rw [← hA, h.activations_dom a]; exact hIds.mem_iff
+    packageIds_nodup := hPIds.nodup_iff.mp h.packageIds_nodup
+    packages_dom := fun p => by rw [← hP, h.packages_dom p]; exact hPIds.mem_iff
+    used_nonempty := by rw [← hN, ← hE]; exact h.used_nonempty
+    current_used := by rw [← hN, ← hE]; exact h.current_used
+    used_edges := by rw [← hN, ← hE]; exact h.used_edges
+    activation_nodes_used := by rw [← hA, ← hN]; exact h.activation_nodes_used
+    ownership := by rw [← hA, ← hP]; exact h.ownership
+    outputs_recorded := by rw [← hA, ← hP]; exact h.outputs_recorded
+    schema_closure := by rw [← hP]; exact h.schema_closure
+    acyclic := by rw [← hDep]; exact h.acyclic
+    triggers := by rw [← hA]; exact h.triggers
+    consumed := by rw [← hA, ← hP]; exact h.consumed
+    inputs := by rw [← hA, ← hP]; exact h.inputs
+    join_authority := by rw [← hA, ← hP]; exact h.join_authority
+    delivery_used := by rw [← hP, ← hE, ← hN]; exact h.delivery_used
+    delivery_current := by rw [← hP]; exact h.delivery_current
+    delivery_consistent := by rw [← hP]; exact h.delivery_consistent
+    birth_edge := by rw [← hP, ← hO]; exact h.birth_edge
+    custody := by rw [← hP]; exact h.custody
+    all_routes := by rw [← hP]; exact h.all_routes
+    retirement := by rw [← hP, ← hA, ← hR]; exact h.retirement
+    explicit_stamps := by rw [← hP]; exact h.explicit_stamps
+    structural_stamps := by rw [← hP, ← hD]; exact h.structural_stamps
+    revision := by rw [← hR, ← hT, ← hX, ← hD, ← hIds.length_eq]; exact h.revision }
 
 -- Restoration needs nothing of `Δ` beyond `WF`: `hΔ` is unused, and kept so that the
 -- statement is exactly `Ontography.checkpoint_of_wf`.

@@ -120,6 +120,19 @@ theorem checkpoint_sound (hΔ : Δ.Admitted) (h : CheckpointValid Δ S) :
       S'.definitionChanges = S.definitionChanges ∧ S'.revision = S.revision ∧ WF Δ S' :=
   Proofs.checkpoint_sound hΔ h
 
+/-- Restoration's checks characterize the invariants exactly: a checkpoint passes if and only
+if some well-formed state records it. -/
+theorem checkpoint_exact (hΔ : Δ.Admitted) :
+    CheckpointValid Δ S ↔ ∃ S', SameCheckpoint S S' ∧ WF Δ S' := by
+  constructor
+  · intro h
+    obtain ⟨S', hA, hP, hIds, hPIds, hN, hE, hD, hR, hwf⟩ := checkpoint_sound hΔ h
+    exact ⟨S', ⟨hA.symm, hP.symm, hIds.symm, hPIds ▸ List.Perm.refl _, hN.symm, hE.symm,
+      hD.symm, hR.symm⟩, hwf⟩
+  · rintro ⟨S', ⟨hA, hP, hIds, hPIds, hN, hE, hD, hR⟩, hwf⟩
+    exact checkpointValid_congr ⟨hA.symm, hP.symm, hIds.symm, hPIds.symm, hN.symm, hE.symm,
+      hD.symm, hR.symm⟩ (checkpoint_of_wf hΔ hwf)
+
 end
 
 /-! ## Fixed-graph replay (T5) -/
