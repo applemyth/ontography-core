@@ -50,11 +50,17 @@ Each holds for every validator, commitment function, and rewrite grammar.
   definition introduces only identities never used before.
 - `causal_acyclic`: the causal history is acyclic.
 - `rewrite_local`, `rewrite_commute` (T4): a rewrite changes only packages at holders it
-  affects, and rewrites with disjoint affected holders commute up to retirement stamps.
-- `activation_persists`, `removed_node_never_returns`, `removed_edge_never_returns` (T6).
-- `checkpoint_of_wf`, `checkpoint_gap`: checkpoint restoration accepts every well-formed
-  state, and its checks are strictly weaker than `WF`.
-- `replay_history` (T5): fixed-graph replay reproduces a state reached by activations alone.
+  affects; when both orders of two rewrites apply, they yield the same definition, and if
+  their affected holders are disjoint they commute on every package up to retirement stamps.
+- `sysSteps_frame`, `activation_persists`, `accepted_not_reaccepted`, `sysStep_newborn`,
+  `removed_node_never_returns`, `removed_edge_never_returns` (T6): no activation, package,
+  node, or edge identity is ever reused.
+- `checkpoint_of_wf`, `checkpoint_sound`: checkpoint restoration checks exactly the
+  invariants — it accepts a checkpoint exactly when some well-formed state records it, up
+  to acceptance order.
+- `replay_history`, `replay_causal`, `replay_sound`, `activationRun_of_revision` (T5):
+  replay accepts only faithful histories and, in any causal order, reproduces a state
+  reached by activations alone, which `revision = |A|` identifies.
 
 ## What is trusted
 

@@ -7,8 +7,11 @@ their interaction; transitions change the graph or its occurrence state. The
 The [transition specification](docs/TRANSITIONS.md) gives the concrete storage
 records, verifier obligations, and adapter interface.
 
-This is an implementation-aligned specification. The linked tests exercise its
-rules; they are not a machine-checked proof of every possible execution.
+The normative statement of the calculus is the Lean model in
+[formal/](formal/README.md). This document is its readable companion: each
+section names the definitions and theorems that state it. The model's theorems
+are machine-checked, and the Rust kernel is checked against the model by a
+differential test over random operation sequences.
 
 ## 1. Admitted definition
 
@@ -67,13 +70,16 @@ not identify executable validator code. A rewrite grammar is a separate trusted
 policy supplied to the kernel or configured on the runtime.
 
 Implementation: [graph declarations](crates/calculus/src/graph.rs) and
-[definition admission](crates/calculus/src/kernel/definition.rs).
+[definition admission](crates/calculus/src/kernel/definition.rs). Model:
+`Definition` and `Definition.Admitted` in
+[Definition.lean](formal/Ontography/Definition.lean).
 
 ## 2. Packages, activations, and state
 
 A package occurrence has identity `p = (a, i)`, where `a = producer(p)` is its
 unique producing activation and `i` distinguishes that activation's outputs.
-Its record is:
+Live evaluation numbers an activation's outputs `0, 1, …` in the order they were
+requested. Its record is:
 
 ```
 P(p) = (type_p, authority_p, digest_p, producer_node_p, delivery_p, status_p)
@@ -120,6 +126,11 @@ when `status_p = Consumed(b)`. It is acyclic even when the workflow topology
 contains cycles: each new accepted activation consumes existing packages and
 creates fresh output occurrences.
 
+Model: `PackageRecord`, `Activation`, and `State` in
+[State.lean](formal/Ontography/State.lean). A model state also records each
+admitted edge's incidence and the revision of each definition change, so that
+I3 and the retirement-stamp rules below are properties of a single state.
+
 ## 3. Activation admission
 
 Write `Δ; S ⊢ proposal ⇓ τ` when evaluation accepts a proposal and constructs
@@ -127,6 +138,11 @@ a transition. Here `S` is a well-formed state bound to `Δ`. Evaluation reads th
 state and does not mutate it. Every accepted transition is bound to the evaluated
 definition identity, fingerprint, revision, and nonce; the revision must have
 room for one increment.
+
+A proposal is a trigger, result bytes, and a list of requested outputs. Each
+output names a destination, either a delivery edge or an object type for an
+outbound birth, an authority operation, and payload bytes. The inputs of a
+package trigger form a set.
 
 ### Trigger and result
 
@@ -206,9 +222,11 @@ After verification against the state being mutated, acceptance records the
 activation under its fresh identity, records its result and outputs, marks each
 input `Consumed(a)`, and inserts every fresh output as `Live`. These changes
 occur together. Rejection changes none of the accepted state. Preparation and
-observation alone do not reserve inputs.
+observation alone do not reserve inputs. Which premise failed is not part of the
+calculus: the kernel's rejection variants are diagnostics.
 
-Implementation and coverage: [admission](crates/calculus/src/kernel/admission.rs),
+Model: `activate`, with `rootTrigger?`, `packageTrigger?`, and `emission?`, in
+[Step.lean](formal/Ontography/Step.lean). Implementation and coverage: [admission](crates/calculus/src/kernel/admission.rs),
 [calculus tests](tests/calculus.rs), and [rule coverage](tests/rule_coverage.rs).
 
 ## 4. Transfer and retirement
@@ -234,19 +252,27 @@ accepted activation in the same state. Its effect is
 its history. Evidence existence is checked, but no additional causal relation
 between the evidence and retired package is required.
 
+Model: `transfer` and `retire` in [Step.lean](formal/Ontography/Step.lean).
+
 ## 5. Graph rewriting
 
-A grammar contains permitted productions `L ← K → R`. `L` and `R` are annotated
-graph fragments admitted under the current schema and contracts; `K` identifies
-the preserved interface. A request provides an injective match of `L` into the
-current graph and fresh node and edge identities for `R` outside `K`.
+A grammar contains permitted productions `L ← K → R` with distinct identities.
+`L` and `R` are annotated graph fragments admitted under the current schema and
+contracts. `K` names the preserved interface: its nodes and edges occur in both
+`L` and `R`, each interface edge has both endpoints in `K` and the same
+incidence on both sides, and each interface element has the same annotation on
+both sides. A request binds exactly the symbols of `L` to current identities and
+exactly those of `R` outside `K` to fresh ones, injectively and nonempty.
 
-Admission requires preservation of matched topology and annotations. A preserved
-node keeps its types, result contract, ingress, root ceiling, and authority
-transitions; a preserved edge keeps its endpoints and annotations. Deleting a
-node requires deleting every incident edge. Fresh identities must never have
-appeared in that state's lifetime identity sets. The complete replacement
-definition `Δ'` is admitted before the change is committed.
+A match is exact. Each matched node has the types, result contract, ingress,
+root ceiling, and authority transitions its symbol has in `L`, and each matched
+edge has its symbol's endpoints and complete annotation. Every edge incident to
+a deleted node must itself be matched in `L` outside `K`: a rewrite never
+removes an unmatched edge. Fresh identities must never have appeared in that
+state's lifetime identity sets. The replacement definition `Δ'` is `Δ` without
+the elements matched outside `K`, plus `R` outside `K` under its fresh
+identities, with each new edge's endpoints at the images of its interface or
+fresh endpoints. `Δ'` is admitted before the change is committed.
 
 A production may introduce new root rules and authority transitions on new
 nodes, including when `L` is empty. Existing consumed or retired records remain
@@ -274,7 +300,11 @@ sets across both application orders; the precise conditions are in the
 [transition specification](docs/TRANSITIONS.md).
 
 Implementation: [rewriting](crates/calculus/src/kernel/rewrite.rs) and
-[cleanup](crates/calculus/src/kernel/frontier.rs).
+[cleanup](crates/calculus/src/kernel/frontier.rs). Model: `structural?`,
+`cleanup?`, and `rewrite` in [Rewrite.lean](formal/Ontography/Rewrite.lean).
+`rewrite_spec` states the rule exactly, `wf_rewrite` that it preserves every
+invariant, `rewrite_local` that it changes only packages at affected holders,
+and `rewrite_commute` the commutation condition (T4).
 
 ## 6. Vocabulary extension
 
@@ -288,6 +318,9 @@ The implementation additionally requires each existing contract to share its
 validator with the replacement registry. Equal names or structural fingerprints
 alone do not establish equal executable predicates. Extension changes the
 definition binding and revision, leaving packages and activations untouched.
+
+Model: `extend` in [Rewrite.lean](formal/Ontography/Rewrite.lean), stated
+exactly by `extend_spec`.
 
 ## 7. Transition application and invariants
 
@@ -307,18 +340,38 @@ output had no birth edge. An explicit retirement has reason `Explicit`.
 Structural cleanup contributes through its rewrite, even if many packages
 retire together. Identity rewrites still increment `r` and `d`.
 
-The rules preserve these properties:
+Every reachable state satisfies the invariants I1–I7 of the
+[transition specification](docs/TRANSITIONS.md), together with causal
+acyclicity:
 
-- Every package belongs to exactly one producer's output map.
-- Every package is exactly one of live, consumed, or retired. Only live,
-  delivered packages can be consumed, at most once.
-- Consumed inputs share their activation's recorded node and governing authority.
-- Delivery happens at most once, over a route admitted when it occurred.
-- Every live holder exists in the current graph. A live receipt at an `All`
+- I1: every package belongs to exactly one producer's output map and carries
+  its birth metadata.
+- I2: every package is exactly one of live, consumed, or retired. Only live,
+  delivered packages can be consumed, at most once, and consumed inputs share
+  their activation's recorded node and governing authority.
+- I3: every delivery names an edge from the producer's node to the receiver
+  that was admitted in the state's lifetime; the rules deliver only over an
+  edge of the current definition.
+- I4: a retirement's reason admits the package's phase, only an explicit
+  retirement carries evidence, and every stamp is a past revision: distinct for
+  explicit retirements, a definition change for structural ones. A removed
+  holder is absent from the current graph.
+- I5: every live holder exists in the current graph. A live receipt at an `All`
   node names a current incoming edge.
-- Immutable package facts remain unchanged, and deleted graph identities are
-  never reused within the state's lifetime.
-- The producer-to-consumer history is acyclic and revision accounting is exact.
+- I6: revision accounting is exact.
+- I7: lifetime identities include the current graph's and are never reused.
+- The producer-to-consumer history is acyclic.
+
+These are properties of one state. Two other kinds of property constrain how
+states change. Each transition keeps every accepted activation, every package's
+immutable facts, a delivery once made, and a status once no longer live. Across
+a run, an identity that leaves the graph never returns.
+
+Model: `WF` and `Frame` in [Invariants.lean](formal/Ontography/Invariants.lean).
+`wf_of_sysReachable` proves the invariants of every reachable workflow and
+`causal_acyclic` its acyclicity; `step_frame` and `sysStep_frame` prove the
+per-transition properties; `activation_persists`, `removed_node_never_returns`,
+and `removed_edge_never_returns` prove the run properties.
 
 These are properties of admitted transitions over faithful state. Storage
 adapters evaluate against views and verify against their actual records before
@@ -338,7 +391,8 @@ retirements, rewrites, and extensions are outside that replay format.
 Checkpoint restoration validates the current dynamic state's invariants and
 definition binding without replaying historical contracts or graph changes.
 Because a state keeps no past graphs, a delivery over an edge that has since
-been removed is checked only against the lifetime identity sets. Acceptance of
+been removed is checked only against the lifetime identity sets and against
+every other delivery over that edge. Acceptance of
 a checkpoint is an integrity check for a trusted store; it does not
 independently prove reachability from an empty state.
 
@@ -347,7 +401,14 @@ artifact storage, and filesystem workspaces belong to the layers surrounding
 the calculus. Kernel admission governs proposed workflow facts. Atomicity of
 those facts does not make a worker's external side effects transactional.
 
-See [restoration](crates/calculus/src/kernel/checkpoint.rs),
+Model: `replay_history` and `replay_causal` prove that replaying the history
+of a state reached by activations alone, in any causal order, reproduces it up
+to the order of acceptance; `replay_sound` that replay accepts only faithful
+histories; and `activationRun_of_revision` that `r = |A|` identifies such
+states. `checkpoint_of_wf` and `checkpoint_sound` prove that checkpoint
+restoration checks exactly the invariants: it accepts a checkpoint exactly when
+some well-formed state records it, up to acceptance order. See
+[restoration](crates/calculus/src/kernel/checkpoint.rs),
 [prepared-plan tests](tests/prepared_plans.rs),
 [negative verification tests](tests/verify_negative.rs), and
 [adapter equivalence tests](tests/adapter_equivalence.rs).

@@ -48,7 +48,8 @@ interact.
 10. [Application Composition](#application-composition)
 
 The [mathematical definition](MATHEMATICAL_DEFINITION.md) specifies the calculus
-separately.
+separately, and the Lean model in [formal/](formal/README.md) states it
+normatively, with machine-checked proofs of its invariants.
 
 ## Nodes
 
@@ -776,6 +777,7 @@ cargo test --release --workspace
 ```
 
 The [mathematical definition](MATHEMATICAL_DEFINITION.md),
-[storage transition specification](docs/TRANSITIONS.md), and
-[frontier rewriting guide](docs/FRONTIER_REWRITING.md) provide further detail.
+[storage transition specification](docs/TRANSITIONS.md),
+[frontier rewriting guide](docs/FRONTIER_REWRITING.md), and
+[Lean model](formal/README.md) provide further detail.
 The [previous README](docs/archive/README-2026-09-26.md) is preserved in the archive.

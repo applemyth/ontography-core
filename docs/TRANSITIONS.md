@@ -259,7 +259,8 @@ Checkpoint restoration takes `(definition_id, definition_fingerprint, A, P,
 used_node_ids, used_edge_ids, definition_changes, revision)`, requires the
 definition binding to name the restoring kernel, and verifies I1 through I7 and
 causal acyclicity, plus consequences of admission and cleanup that a trusted store cannot
-legitimately violate: the inputs of a join carry one authority, every root
+legitimately violate: some node identity is allocated whenever an edge
+identity is, the inputs of a join carry one authority, every root
 authority, object type, and carried authority is in the schema, every
 delivery on a current edge matches that edge's incidence, a holder-removed
 retirement never names a current node, and a live receipt at an `All`
@@ -267,15 +268,24 @@ receiver always names a current incoming edge. Its error names the invariant
 family that failed. It does not rerun contracts or cleanup; it is a
 trusted-store integrity check, not a proof of reachability. I3 is verified
 only as far as a state records it: a delivery on a removed edge must name a
-used edge identity and a used receiver, but its incidence at the revision of
-delivery is not recorded and is trusted. Fixed-graph
+used edge identity and a used receiver and agree with every other delivery
+over that edge on its endpoints, but its incidence at the revision of delivery
+is not recorded and is trusted. With these checks restoration checks exactly
+I1–I7: some well-formed state, up to acceptance order, records every
+checkpoint it accepts. Fixed-graph
 restoration (`restore_state`) replays every rule from the activation records
 alone. Export through `to_parts` is available only when there have been no
 definition changes, transfers, or retirements; exact revision accounting then
 gives `revision = |A|`. Checkpoint counters describe recorded operations; they
 do not independently authenticate an omitted or altered history.
 
-## 5. Theorems pinned by tests
+## 5. Theorems
+
+T1–T3 are properties of this implementation and are pinned by tests. T4–T6 are
+properties of the calculus: the Lean model in [formal/](../formal/README.md)
+proves them for every validator and grammar, and tests pin that the kernel
+behaves as the model does. The model proves the invariants I1–I7 themselves as
+`wf_of_sysReachable`.
 
 - **T1 Partition and shape.** The status partition and the one-kind-per-
   transition shape hold by type. Tests pin that every evaluator's output
@@ -305,11 +315,23 @@ do not independently authenticate an omitted or altered history.
   Graph independence alone does not suffice: adding two distinct edges from
   the same holder can retire an `Out` package in only one order. The regression
   pairs two real rewrites and also pins this overlapping-holder counterexample.
+  Proven as `rewrite_commute`, with `rewrite_local` for locality. The model
+  also proves that whenever both orders apply they yield the same definition,
+  so that part of condition (1) is a consequence rather than a hypothesis.
+  The model's `Examples.lean` replays both pairs.
 - **T5 Restoration.** Fixed-graph replay of `to_parts(S)` reproduces `S`
   whenever `revision(S) = |A|`, and checkpoint restoration of any reachable
-  state reproduces it exactly.
+  state reproduces it exactly. The model proves replay: `replay_history` and
+  `replay_causal` (in any causal order, as `consumption_order` replays),
+  `replay_sound` (replay accepts only faithful histories), and
+  `activationRun_of_revision` (`revision = |A|` means only activations
+  happened). It proves that restoration checks exactly I1–I7:
+  `checkpoint_of_wf` and `checkpoint_sound`. That the restored state equals
+  the checkpointed one is pinned by tests.
 - **T6 Freshness.** No node, edge, activation, or package identity is ever
-  reused within one state's lifetime.
+  reused within one state's lifetime. Proven as `sysStep_fresh`,
+  `sysSteps_frame`, `sysStep_newborn`, `accepted_not_reaccepted`,
+  `removed_node_never_returns`, and `removed_edge_never_returns`.
 
 ## 6. Persisted definition encoding
 
