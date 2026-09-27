@@ -52,3 +52,4 @@ elab "#assert_standard_axioms " id:ident : command => do
 #assert_standard_axioms Ontography.replay_sound
 #assert_standard_axioms Ontography.activationRun_of_revision
 #assert_standard_axioms Ontography.replay_causal
+#assert_standard_axioms Ontography.checkpoint_sound

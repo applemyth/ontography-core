@@ -4,6 +4,7 @@ import Ontography.Checkpoint
 import Ontography.Replay
 import Ontography.Proofs.Runs
 import Ontography.Proofs.Replay
+import Ontography.Proofs.Checkpoint
 import Ontography.Proofs.Commutation
 
 /-!
@@ -103,12 +104,12 @@ variable {Δ : Definition} {S : State}
 
 /-- The checks read only the checkpoint. -/
 theorem checkpointValid_congr {S' : State} (hsame : SameCheckpoint S S')
-    (h : CheckpointValid Δ S) : CheckpointValid Δ S' := by
-  sorry
+    (h : CheckpointValid Δ S) : CheckpointValid Δ S' :=
+  Proofs.checkpointValid_congr hsame h
 
 /-- Restoration accepts every well-formed state, so it never rejects a reachable one. -/
-theorem checkpoint_of_wf (hΔ : Δ.Admitted) (hS : WF Δ S) : CheckpointValid Δ S := by
-  sorry
+theorem checkpoint_of_wf (hΔ : Δ.Admitted) (hS : WF Δ S) : CheckpointValid Δ S :=
+  Proofs.checkpoint_of_wf hΔ hS
 
 /-- Restoration checks exactly the invariants: every checkpoint that passes is recorded by a
 well-formed state, which differs from it at most in acceptance order and the ghost logs. -/
@@ -116,8 +117,8 @@ theorem checkpoint_sound (hΔ : Δ.Admitted) (h : CheckpointValid Δ S) :
     ∃ S', S'.activations = S.activations ∧ S'.packages = S.packages ∧
       S'.activationIds.Perm S.activationIds ∧ S'.packageIds = S.packageIds ∧
       S'.usedNodes = S.usedNodes ∧ S'.usedEdges = S.usedEdges ∧
-      S'.definitionChanges = S.definitionChanges ∧ S'.revision = S.revision ∧ WF Δ S' := by
-  sorry
+      S'.definitionChanges = S.definitionChanges ∧ S'.revision = S.revision ∧ WF Δ S' :=
+  Proofs.checkpoint_sound hΔ h
 
 end
 
