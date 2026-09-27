@@ -1,5 +1,7 @@
 import Ontography.System
 import Ontography.Theorems
+import Ontography.Proofs.Extension
+import Ontography.Proofs.System
 
 /-!
 # Theorems of the dynamic calculus
@@ -24,8 +26,8 @@ theorem wf_rewrite (hΔ : Δ.Admitted) (hS : WF Δ S) {req : RewriteRequest}
 /-- An extension admits its replacement definition and preserves every invariant under it. -/
 theorem wf_extend (hΔ : Δ.Admitted) (hS : WF Δ S) {schema : Schema}
     {contracts : List Contract} (h : extend Δ S schema contracts = some (Δ', S')) :
-    Δ'.Admitted ∧ WF Δ' S' := by
-  sorry
+    Δ'.Admitted ∧ WF Δ' S' :=
+  Proofs.wf_extend hΔ hS h
 
 /-- Every transition of a running workflow preserves admission and every invariant. -/
 theorem wf_sysStep (hΔ : Δ.Admitted) (hS : WF Δ S) {op : SysOp}
@@ -47,21 +49,21 @@ theorem wf_of_sysReachable (h : SysReachable accepts H grammar Δ S) :
 
 /-- Every transition of a running workflow advances the revision exactly once. -/
 theorem sysStep_revision {op : SysOp} (h : sysStep accepts H grammar Δ S op = some (Δ', S')) :
-    S'.revision = S.revision + 1 := by
-  sorry
+    S'.revision = S.revision + 1 :=
+  Proofs.sysStep_revision h
 
 /-- Rewrites and extensions change no accepted activation, no package's immutable facts, no
 delivery once made, and no status once no longer live; lifetime records only grow. -/
 theorem sysStep_frame (hS : WF Δ S) {op : SysOp}
-    (h : sysStep accepts H grammar Δ S op = some (Δ', S')) : Frame S S' := by
-  sorry
+    (h : sysStep accepts H grammar Δ S op = some (Δ', S')) : Frame S S' :=
+  Proofs.sysStep_frame hS h
 
 /-- T6 Freshness: a new definition's nodes and edges are current ones or identities never
 used before, so a deleted identity never returns. -/
 theorem sysStep_fresh {op : SysOp} (h : sysStep accepts H grammar Δ S op = some (Δ', S')) :
     (∀ v ∈ Δ'.nodes, v ∈ Δ.nodes ∨ v ∉ S.usedNodes) ∧
-      ∀ e ∈ Δ'.edges, e ∈ Δ.edges ∨ e.id ∉ S.usedEdges := by
-  sorry
+      ∀ e ∈ Δ'.edges, e ∈ Δ.edges ∨ e.id ∉ S.usedEdges :=
+  Proofs.sysStep_fresh h
 
 /-- The rewrite rule, exactly (§5): the registered production's admitted replacement becomes
 the definition; each live package is kept or retired at the successor revision by the cleanup
@@ -87,7 +89,7 @@ theorem rewrite_spec (hS : WF Δ S) {req : RewriteRequest} {evidence : List (Dig
 theorem extend_spec {schema : Schema} {contracts : List Contract}
     (h : extend Δ S schema contracts = some (Δ', S')) :
     Δ' = { Δ with schema := schema, contracts := contracts } ∧
-      S' = { S with changeLog := S.changeLog ++ [S.revision + 1], revision := S.revision + 1 } := by
-  sorry
+      S' = { S with changeLog := S.changeLog ++ [S.revision + 1], revision := S.revision + 1 } :=
+  Proofs.extend_spec h
 
 end Ontography

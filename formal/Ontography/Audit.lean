@@ -1,5 +1,6 @@
 import Lean
 import Ontography.Theorems
+import Ontography.SystemTheorems
 
 /-!
 # Axiom audit
@@ -27,3 +28,8 @@ elab "#assert_standard_axioms " id:ident : command => do
 #assert_standard_axioms Ontography.step_revision
 #assert_standard_axioms Ontography.step_frame
 #assert_standard_axioms Ontography.causal_acyclic
+#assert_standard_axioms Ontography.wf_extend
+#assert_standard_axioms Ontography.extend_spec
+#assert_standard_axioms Ontography.sysStep_revision
+#assert_standard_axioms Ontography.sysStep_frame
+#assert_standard_axioms Ontography.sysStep_fresh
