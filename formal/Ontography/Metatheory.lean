@@ -95,6 +95,16 @@ theorem removed_edge_never_returns (hΔ : Δ.Admitted) (hS : WF Δ S)
     (hgone : e ∉ Δ.edges.map (·.id)) : e ∉ Δ'.edges.map (·.id) :=
   Proofs.removed_edge_never_returns hΔ hS h hused hgone
 
+/-- I3 at the time of delivery: a transition keeps every delivery already made and makes new
+ones only over an edge of the definition it applies to, from the producer's node to the
+receiver. -/
+theorem sysStep_delivery {op : SysOp} (h : sysStep accepts H grammar Δ S op = some (Δ', S'))
+    {p : PackageId} {r' : PackageRecord} {d : Delivery} (hr' : S'.packages p = some r')
+    (hd : r'.delivery = some d) :
+    (∃ r, S.packages p = some r ∧ r.delivery = some d) ∨
+      (⟨d.edge, r'.producerNode, d.receiver⟩ : Edge) ∈ Δ.edges := by
+  sorry
+
 end
 
 /-! ## Checkpoint restoration -/
@@ -150,11 +160,13 @@ theorem replay_history (hΔ : Δ.Admitted) {payloads : List Bytes}
   Proofs.replay_history hΔ hrun hevidence
 
 /-- Replay accepts only faithful histories: whatever it accepts is the history of the state it
-builds, which is reachable. -/
+builds, reached by activations alone from payloads the evidence returns. With
+`replay_history`, replay accepts exactly those histories. -/
 theorem replay_sound {h : List (ActivationId × Activation)} {evidence : Digest → Option Bytes}
     (hreplay : replay accepts H Δ h evidence = some S) :
-    S.history = h ∧ Reachable accepts H Δ S :=
-  Proofs.replay_sound hreplay
+    S.history = h ∧ ∃ payloads, ActivationRun accepts H Δ S payloads ∧
+      ∀ b ∈ payloads, evidence (H b) = some b := by
+  sorry
 
 /-- A reachable workflow whose revision counts only its activations was reached by
 activations alone, under its current definition. -/
