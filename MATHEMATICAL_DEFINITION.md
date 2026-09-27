@@ -337,8 +337,10 @@ retirements, rewrites, and extensions are outside that replay format.
 
 Checkpoint restoration validates the current dynamic state's invariants and
 definition binding without replaying historical contracts or graph changes.
-Acceptance of a checkpoint is an integrity check for a trusted store; it does
-not independently prove reachability from an empty state.
+Because a state keeps no past graphs, a delivery over an edge that has since
+been removed is checked only against the lifetime identity sets. Acceptance of
+a checkpoint is an integrity check for a trusted store; it does not
+independently prove reachability from an empty state.
 
 Executable behavior, scheduling, external effects, invocation access policies,
 artifact storage, and filesystem workspaces belong to the layers surrounding

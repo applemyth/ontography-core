@@ -59,7 +59,9 @@ Every reachable state satisfies:
 - **I3 Delivery.** `delivery(p) = Some(e, v)` implies `e` was an admitted edge
   with `s(e) = producer_node(p)` and `t(e) = v` at the revision of delivery.
   If the producing activation's output for `p` names an edge `e`, then
-  `delivery(p) = Some(e, _)`.
+  `delivery(p) = Some(e, _)`. The first clause refers to a past graph, which a
+  state does not record; for an edge still in the graph it reduces to that
+  edge's current incidence.
 - **I4 Retirement.** `status(p) = Retired(r)` implies: `reason = NoAcceptingEdge`
   only if `phase(p) = Out`; `reason = RouteRemoved` only if `phase(p) = In`;
   `evidence` is `Some` only if `reason = Explicit`; `evidence = Some(a)` implies
@@ -163,10 +165,11 @@ Multiplicity is therefore not something an evaluator can get wrong.
 Every evaluator checks the view's binding against its kernel and the revision's
 headroom before constructing a transition, so its base never names
 another definition or an exhausted revision. Facts an evaluator establishes by
-construction of the sealed transition, namely one record per output, the
-successor revision on every retirement stamp, the reason each kind admits, the
-replacement graph's node set, and the executing node's presence in the
-graph, are asserted in debug builds and are not part of `ApplyError`.
+construction of the sealed transition, namely one record per output, one
+retirement per package, the successor revision on every retirement stamp, the
+reason each kind admits, the replacement graph's node set, and the executing
+node's presence in the graph, are asserted in debug builds and are not part of
+`ApplyError`.
 
 `apply(S, kernel, τ)` runs `verify` against `S` itself, then mutates: performs
 the kind, sets `definition_fingerprint` and increments `definition_changes`
@@ -262,7 +265,10 @@ delivery on a current edge matches that edge's incidence, a holder-removed
 retirement never names a current node, and a live receipt at an `All`
 receiver always names a current incoming edge. Its error names the invariant
 family that failed. It does not rerun contracts or cleanup; it is a
-trusted-store integrity check, not a proof of reachability. Fixed-graph
+trusted-store integrity check, not a proof of reachability. I3 is verified
+only as far as a state records it: a delivery on a removed edge must name a
+used edge identity and a used receiver, but its incidence at the revision of
+delivery is not recorded and is trusted. Fixed-graph
 restoration (`restore_state`) replays every rule from the activation records
 alone. Export through `to_parts` is available only when there have been no
 definition changes, transfers, or retirements; exact revision accounting then

@@ -2,9 +2,12 @@
 //!
 //! A checkpoint is the adapter's view of a whole state. Restoring it checks
 //! the definition binding, the invariants I1 through I7 of the state model,
-//! causal acyclicity, and two consequences of rewrite cleanup. It does not
-//! rerun contracts or cleanup, so it establishes integrity of a trusted
-//! store, not historical reachability.
+//! causal acyclicity, and two consequences of rewrite cleanup. I3 is checked
+//! only as far as a state records it: a delivery on a current edge must match
+//! that edge's incidence, while a delivery on a removed edge needs only a used
+//! edge identity and receiver, because the state keeps no historical
+//! incidence. Restoring does not rerun contracts or cleanup, so it establishes
+//! integrity of a trusted store, not historical reachability.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;

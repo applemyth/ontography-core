@@ -261,8 +261,8 @@ reference metadata to reconcile ledger tags, so overall restart cost grows with
 recorded history. Faulted sessions additionally
 validate a complete checkpoint and all committed content before reopening
 admission. The
-invariants I1–I7 of [docs/TRANSITIONS.md](docs/TRANSITIONS.md) are checked
-through `Kernel::restore_checkpoint` whenever the session exports its exact
+invariants I1–I7 of [docs/TRANSITIONS.md](docs/TRANSITIONS.md), I3 only as
+far as a state records it, are checked through `Kernel::restore_checkpoint` whenever the session exports its exact
 state (`snapshot`, `try_snapshot`, and the verified reopen), which the
 adapter-equivalence test does after every step.
 
@@ -319,7 +319,8 @@ split came with reductions that did change behavior and public API, each
 listed in its round's report. The kernel's dynamics are one transition model
 (`Transition`, `Transition::verify`, `State::apply`) shared by the in-memory
 state and the `SQLite` adapter, whose parity the differential test pins, and
-`restore_checkpoint` verifies I1–I7 plus the definition binding. The session
+`restore_checkpoint` verifies I1–I7 (I3 only as far as a state records it)
+plus the definition binding. The session
 reports failure through one `SessionError` set and one fault ladder, treats
 missing or corrupt payload evidence for a package it has a row for as a
 `Storage` failure rather than a kernel rejection, applies the same fault rule

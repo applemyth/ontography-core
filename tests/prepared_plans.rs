@@ -1,5 +1,9 @@
-//! Every direct prepare/commit pair fences its predecessor before admission.
-use ontography::{ExtensionError, Kernel, RewriteError, RewriteGrammar, Schema, TransferError};
+//! Every direct prepare/commit pair fences its predecessor before admission,
+//! and every evaluator refuses a state whose revision cannot advance.
+use ontography::{
+    ActivationProposal, ExtensionError, Kernel, Reject, RetireError, RewriteError, RewriteGrammar,
+    Schema, TransferError,
+};
 use std::sync::Arc;
 #[allow(dead_code)]
 mod support;
@@ -53,6 +57,43 @@ fn definition_changes_make_every_prepared_operation_stale() {
     assert!(matches!(
         current.commit_transfer(&mut state, transfer),
         Err(TransferError::Admission(RewriteError::Stale))
+    ));
+    assert_eq!(state, before);
+}
+
+/// Checkpoint restoration accepts any revision whose accounting is exact, so a
+/// trusted store can hand back a state at `u64::MAX`. Every evaluator rejects
+/// it before building a transition, and the state is unchanged.
+#[test]
+fn an_exhausted_revision_rejects_every_transition_kind() {
+    let k = support::kernel(&["A", "B"], &[("ab", "A", "B", "payload")]);
+    let (grammar, request) = support::normalization();
+    let mut state = k.empty_state();
+    let package = support::outbound(&k, &mut state, "A");
+    let mut checkpoint = state.checkpoint();
+    checkpoint.definition_changes = u64::MAX - 1;
+    checkpoint.revision = u64::MAX;
+    let mut state = k.restore_checkpoint(checkpoint).unwrap();
+    assert_eq!(state.revision(), u64::MAX);
+    let before = state.clone();
+
+    let root = ActivationProposal::root("A", support::authority(), support::payload());
+    assert_eq!(k.activate(&mut state, root), Err(Reject::RevisionExhausted));
+    assert!(matches!(
+        k.prepare_transfer(&state, package, "ab", &support::payload()),
+        Err(TransferError::Admission(RewriteError::RevisionExhausted))
+    ));
+    assert!(matches!(
+        k.retire(&mut state, package, None),
+        Err(RetireError::Admission(RewriteError::RevisionExhausted))
+    ));
+    assert!(matches!(
+        k.prepare_rewrite(&state, &grammar, &request, &support::evidence()),
+        Err(RewriteError::RevisionExhausted)
+    ));
+    assert!(matches!(
+        k.prepare_extension(&state, extended(&k)),
+        Err(ExtensionError::Admission(RewriteError::RevisionExhausted))
     ));
     assert_eq!(state, before);
 }

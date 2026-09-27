@@ -2,12 +2,6 @@
 //! authority transitions, edge authority matching on emission and transfer,
 //! join-shape rejections, root rejections, outbound consumption, schema
 //! closure, and the definition fingerprint.
-//!
-//! `Reject::RevisionExhausted` and `RewriteError::RevisionExhausted` are
-//! deliberately absent. A `State` at revision `u64::MAX` is not constructible
-//! through the public API: `Kernel::empty_state` starts at 0,
-//! `Kernel::restore_state` sets the revision to the activation count, and every
-//! public transition advances it by exactly one.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;

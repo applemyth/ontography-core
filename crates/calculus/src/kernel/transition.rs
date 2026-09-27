@@ -16,11 +16,12 @@
 //! is decided here, for any view, faithful or not.
 //!
 //! A transition is sealed: only an evaluator constructs one. Facts the
-//! evaluators establish by construction (one record per output, the successor
-//! revision stamp on every retirement, the reason each kind admits, and the
-//! node set of a replacement graph) are asserted in debug builds and are not
-//! part of [`ApplyError`], which names only the preconditions a faithful state
-//! can fail.
+//! evaluators establish by construction (one record per output, one
+//! retirement per package, the successor revision stamp on every retirement,
+//! the reason each kind admits, the node set of a replacement graph, and the
+//! executing node's presence in the graph) are asserted in debug builds and
+//! are not part of [`ApplyError`], which names only the preconditions a
+//! faithful state can fail.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -410,10 +411,14 @@ fn verify_activation(
     if view.activation_known(id) {
         return Err(ApplyError::ActivationExists(id));
     }
+    // The evaluator admitted the recorded node against the same definition
+    // `verify` checked above, so it is a node of the graph.
+    debug_assert!(
+        kernel.graph().node(activation.node_id()).is_some(),
+        "an activation executes at a node of the graph"
+    );
     // The executing node: a root's declared node, or the common holder of the
-    // consumed inputs, which must all be live and delivered there (I2). The
-    // evaluator established that this node is in the graph, against the same
-    // definition `verify` checked above.
+    // consumed inputs, which must all be live and delivered there (I2).
     let node: Arc<str> = match &activation.trigger {
         Trigger::Orig { node_id, .. } => Arc::clone(node_id),
         Trigger::Pkgs { package_ids } => {
@@ -445,7 +450,15 @@ fn verify_activation(
             return Err(ApplyError::InputRecordMismatch(*package));
         }
     }
-    debug_assert_eq!(outputs.len(), activation.outputs.len());
+    debug_assert!(
+        outputs.len() == activation.outputs.len()
+            && outputs
+                .iter()
+                .map(|(package, _)| package)
+                .collect::<BTreeSet<_>>()
+                == activation.outputs.keys().collect::<BTreeSet<_>>(),
+        "an activation transition carries one record per output"
+    );
     for (package, record) in outputs {
         let Some(output) = activation.outputs.get(package) else {
             return Err(ApplyError::OutputMismatch(*package));
