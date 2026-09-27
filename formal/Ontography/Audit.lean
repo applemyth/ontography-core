@@ -35,3 +35,10 @@ elab "#assert_standard_axioms " id:ident : command => do
 #assert_standard_axioms Ontography.sysStep_frame
 #assert_standard_axioms Ontography.sysStep_fresh
 #assert_standard_axioms Ontography.replay_history
+#assert_standard_axioms Ontography.wf_rewrite
+#assert_standard_axioms Ontography.rewrite_spec
+#assert_standard_axioms Ontography.wf_sysStep
+#assert_standard_axioms Ontography.wf_of_sysReachable
+#assert_standard_axioms Ontography.activation_persists
+#assert_standard_axioms Ontography.removed_node_never_returns
+#assert_standard_axioms Ontography.removed_edge_never_returns

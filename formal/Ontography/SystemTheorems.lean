@@ -2,6 +2,7 @@ import Ontography.System
 import Ontography.Theorems
 import Ontography.Proofs.Extension
 import Ontography.Proofs.System
+import Ontography.Proofs.Rewrite
 
 /-!
 # Theorems of the dynamic calculus
@@ -20,8 +21,8 @@ variable {accepts : ContractId → Bytes → Bool} {H : Bytes → Digest}
 theorem wf_rewrite (hΔ : Δ.Admitted) (hS : WF Δ S) {req : RewriteRequest}
     {evidence : List (Digest × Bytes)}
     (h : rewrite accepts H grammar Δ S req evidence = some (Δ', S')) :
-    Δ'.Admitted ∧ WF Δ' S' := by
-  sorry
+    Δ'.Admitted ∧ WF Δ' S' :=
+  Proofs.wf_rewrite hΔ hS h
 
 /-- An extension admits its replacement definition and preserves every invariant under it. -/
 theorem wf_extend (hΔ : Δ.Admitted) (hS : WF Δ S) {schema : Schema}
@@ -82,8 +83,8 @@ theorem rewrite_spec (hS : WF Δ S) {req : RewriteRequest} {evidence : List (Dig
         ∃ fate, cleanup? accepts H Δ rep.next rep.deleted evidence r = some fate ∧
           S'.packages q = some (match fate with
             | none => r
-            | some reason => { r with status := .retired ⟨reason, S.revision + 1, none⟩ }) := by
-  sorry
+            | some reason => { r with status := .retired ⟨reason, S.revision + 1, none⟩ }) :=
+  Proofs.rewrite_spec hS h
 
 /-- The extension rule, exactly (§6): only the vocabulary and the counters change. -/
 theorem extend_spec {schema : Schema} {contracts : List Contract}
