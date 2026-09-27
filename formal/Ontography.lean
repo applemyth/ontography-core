@@ -4,3 +4,6 @@ import Ontography.State
 import Ontography.Step
 import Ontography.Invariants
 import Ontography.Theorems
+import Ontography.Rewrite
+import Ontography.System
+import Ontography.SystemTheorems
