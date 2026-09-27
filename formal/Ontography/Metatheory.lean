@@ -2,6 +2,7 @@ import Ontography.Commutation
 import Ontography.Runs
 import Ontography.Checkpoint
 import Ontography.Replay
+import Ontography.Proofs.Runs
 
 /-!
 # Metatheory
@@ -57,20 +58,20 @@ variable {accepts : ContractId → Bytes → Bool} {H : Bytes → Digest}
 /-- An accepted activation is never replaced, so no activation identity is accepted twice. -/
 theorem activation_persists (hΔ : Δ.Admitted) (hS : WF Δ S)
     (h : SysSteps accepts H grammar Δ S Δ' S') {a : ActivationId} {act : Activation}
-    (ha : S.activations a = some act) : S'.activations a = some act := by
-  sorry
+    (ha : S.activations a = some act) : S'.activations a = some act :=
+  Proofs.activation_persists hΔ hS h ha
 
 /-- A node identity that has left the definition never returns to it. -/
 theorem removed_node_never_returns (hΔ : Δ.Admitted) (hS : WF Δ S)
     (h : SysSteps accepts H grammar Δ S Δ' S') {v : NodeId} (hused : v ∈ S.usedNodes)
-    (hgone : v ∉ Δ.nodes) : v ∉ Δ'.nodes := by
-  sorry
+    (hgone : v ∉ Δ.nodes) : v ∉ Δ'.nodes :=
+  Proofs.removed_node_never_returns hΔ hS h hused hgone
 
 /-- An edge identity that has left the definition never returns to it. -/
 theorem removed_edge_never_returns (hΔ : Δ.Admitted) (hS : WF Δ S)
     (h : SysSteps accepts H grammar Δ S Δ' S') {e : EdgeId} (hused : e ∈ S.usedEdges)
-    (hgone : e ∉ Δ.edges.map (·.id)) : e ∉ Δ'.edges.map (·.id) := by
-  sorry
+    (hgone : e ∉ Δ.edges.map (·.id)) : e ∉ Δ'.edges.map (·.id) :=
+  Proofs.removed_edge_never_returns hΔ hS h hused hgone
 
 end
 
