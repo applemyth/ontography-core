@@ -3,6 +3,7 @@ import Ontography.Runs
 import Ontography.Checkpoint
 import Ontography.Replay
 import Ontography.Proofs.Runs
+import Ontography.Proofs.Replay
 import Ontography.Proofs.Commutation
 
 /-!
@@ -131,22 +132,22 @@ every payload it used, reproduces the state exactly. -/
 theorem replay_history (hΔ : Δ.Admitted) {payloads : List Bytes}
     (hrun : ActivationRun accepts H Δ S payloads) {evidence : Digest → Option Bytes}
     (hevidence : ∀ b ∈ payloads, evidence (H b) = some b) :
-    replay accepts H Δ S.history evidence = some S := by
-  sorry
+    replay accepts H Δ S.history evidence = some S :=
+  Proofs.replay_history hΔ hrun hevidence
 
 /-- Replay accepts only faithful histories: whatever it accepts is the history of the state it
 builds, which is reachable. -/
 theorem replay_sound {h : List (ActivationId × Activation)} {evidence : Digest → Option Bytes}
     (hreplay : replay accepts H Δ h evidence = some S) :
-    S.history = h ∧ Reachable accepts H Δ S := by
-  sorry
+    S.history = h ∧ Reachable accepts H Δ S :=
+  Proofs.replay_sound hreplay
 
 /-- A reachable workflow whose revision counts only its activations was reached by
 activations alone, under its current definition. -/
 theorem activationRun_of_revision {grammar : List Production}
     (h : SysReachable accepts H grammar Δ S) (hrevision : S.revision = S.activationIds.length) :
-    ∃ payloads, ActivationRun accepts H Δ S payloads := by
-  sorry
+    ∃ payloads, ActivationRun accepts H Δ S payloads :=
+  Proofs.activationRun_of_revision h hrevision
 
 /-- Replay in any causal order of the history, such as the kernel's consumption order,
 reproduces the state up to the order of acceptance. -/
@@ -160,8 +161,8 @@ theorem replay_causal (hΔ : Δ.Admitted) {payloads : List Bytes}
     ∃ S', replay accepts H Δ h evidence = some S' ∧ S'.activations = S.activations ∧
       S'.packages = S.packages ∧ S'.activationIds.Perm S.activationIds ∧
       S'.packageIds.Perm S.packageIds ∧ S'.usedNodes = S.usedNodes ∧ S'.edgeLog = S.edgeLog ∧
-      S'.changeLog = S.changeLog ∧ S'.revision = S.revision := by
-  sorry
+      S'.changeLog = S.changeLog ∧ S'.revision = S.revision :=
+  Proofs.replay_causal hΔ hrun hevidence hperm hcausal
 
 end
 

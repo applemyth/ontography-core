@@ -49,3 +49,6 @@ elab "#assert_standard_axioms " id:ident : command => do
 #assert_standard_axioms Ontography.sysSteps_frame
 #assert_standard_axioms Ontography.accepted_not_reaccepted
 #assert_standard_axioms Ontography.sysStep_newborn
+#assert_standard_axioms Ontography.replay_sound
+#assert_standard_axioms Ontography.activationRun_of_revision
+#assert_standard_axioms Ontography.replay_causal
