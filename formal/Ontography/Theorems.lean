@@ -1,4 +1,9 @@
-import Ontography.Invariants
+import Ontography.Proofs.Initial
+import Ontography.Proofs.Activation
+import Ontography.Proofs.Transfer
+import Ontography.Proofs.Retire
+import Ontography.Proofs.Revision
+import Ontography.Proofs.Acyclic
 
 /-!
 # Theorems of the fixed-definition calculus
@@ -13,23 +18,23 @@ variable {accepts : ContractId → Bytes → Bool} {H : Bytes → Digest} {Δ : 
   {S S' : State}
 
 /-- The empty state of an admitted definition is well formed. -/
-theorem wf_initial (hΔ : Δ.Admitted) : WF Δ (State.initial Δ) := by
-  sorry
+theorem wf_initial (hΔ : Δ.Admitted) : WF Δ (State.initial Δ) :=
+  Proofs.wf_initial hΔ
 
 /-- Activation preserves every invariant. -/
 theorem wf_activate (hΔ : Δ.Admitted) (hS : WF Δ S) {a : ActivationId} {prop : Proposal}
-    (h : activate accepts H Δ S a prop = some S') : WF Δ S' := by
-  sorry
+    (h : activate accepts H Δ S a prop = some S') : WF Δ S' :=
+  Proofs.wf_activate hΔ hS h
 
 /-- Transfer preserves every invariant. -/
 theorem wf_transfer (hΔ : Δ.Admitted) (hS : WF Δ S) {p : PackageId} {e : EdgeId}
-    {payload : Bytes} (h : transfer accepts H Δ S p e payload = some S') : WF Δ S' := by
-  sorry
+    {payload : Bytes} (h : transfer accepts H Δ S p e payload = some S') : WF Δ S' :=
+  Proofs.wf_transfer hΔ hS h
 
 /-- Explicit retirement preserves every invariant. -/
 theorem wf_retire (hΔ : Δ.Admitted) (hS : WF Δ S) {p : PackageId}
-    {evidence : Option ActivationId} (h : retire S p evidence = some S') : WF Δ S' := by
-  sorry
+    {evidence : Option ActivationId} (h : retire S p evidence = some S') : WF Δ S' :=
+  Proofs.wf_retire hΔ hS h
 
 /-- Every transition preserves every invariant. -/
 theorem wf_step (hΔ : Δ.Admitted) (hS : WF Δ S) {op : Op}
@@ -47,20 +52,20 @@ theorem wf_of_reachable (hΔ : Δ.Admitted) (h : Reachable accepts H Δ S) : WF 
 
 /-- Each transition advances the revision exactly once. -/
 theorem step_revision {op : Op} (h : step accepts H Δ S op = some S') :
-    S'.revision = S.revision + 1 := by
-  sorry
+    S'.revision = S.revision + 1 :=
+  Proofs.step_revision h
 
 /-- A transition changes no accepted activation, no package's immutable facts, no delivery
 once made, and no status once no longer live; a fixed-definition transition keeps the
 lifetime records. -/
-theorem step_frame {op : Op} (h : step accepts H Δ S op = some S') :
+theorem step_frame (hS : WF Δ S) {op : Op} (h : step accepts H Δ S op = some S') :
     Frame S S' ∧ S'.usedNodes = S.usedNodes ∧ S'.edgeLog = S.edgeLog ∧
       S'.changeLog = S.changeLog := by
   sorry
 
 /-- The causal history is acyclic, even when the workflow graph has cycles. -/
 theorem causal_acyclic (hS : WF Δ S) (b : ActivationId) :
-    ¬ Relation.TransGen (DependsOn S) b b := by
-  sorry
+    ¬ Relation.TransGen (DependsOn S) b b :=
+  Proofs.causal_acyclic hS b
 
 end Ontography

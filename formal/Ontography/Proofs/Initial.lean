@@ -38,6 +38,7 @@ theorem wf_initial (hΔ : Δ.Admitted) : WF Δ (State.initial Δ) where
   edge_log_ids := hΔ.edges_nodup
   activation_nodes_used _ _ h := nomatch h
   edge_log_nodes := hΔ.endpoints
+  used_nonempty := ⟨hΔ.nodes_nonempty, hΔ.edges_nonempty⟩
   causal_order _ _ _ h := nomatch h
   schema_closure _ _ h := nomatch h
 

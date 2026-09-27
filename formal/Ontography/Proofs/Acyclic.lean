@@ -13,7 +13,7 @@ namespace Ontography.Proofs
 
 variable {Δ : Definition} {S : State}
 
-namespace Frame
+namespace Common
 
 /-- A causal ancestor was accepted strictly before its descendant. -/
 theorem idxOf_lt_of_transGen (hS : WF Δ S) {b a : ActivationId}
@@ -27,11 +27,11 @@ theorem idxOf_lt_of_transGen (hS : WF Δ S) {b a : ActivationId}
     obtain ⟨p, r, rfl, hp, hs⟩ := hd
     exact Nat.lt_trans (hS.causal_order p r _ hp hs) ih
 
-end Frame
+end Common
 
 /-- The causal history is acyclic, even when the workflow graph has cycles. -/
 theorem causal_acyclic (hS : WF Δ S) (b : ActivationId) :
     ¬ Relation.TransGen (DependsOn S) b b :=
-  fun h => Nat.lt_irrefl _ (Frame.idxOf_lt_of_transGen hS h)
+  fun h => Nat.lt_irrefl _ (Common.idxOf_lt_of_transGen hS h)
 
 end Ontography.Proofs

@@ -125,51 +125,64 @@ theorem inputEdge_spec {S : State} {v : NodeId} {α : Authority} {p : PackageId}
   obtain ⟨r, hr, _, hlive, d, hd, _, hrecv, _, hset, _⟩ := h
   exact ⟨r, d, hr, hlive, hd, hrecv, hset⟩
 
-/-- An admitted package trigger is nonempty, and each input satisfies `InputOK` for the
+/-- An admitted package trigger is a nonempty set, and each input satisfies `InputOK` for the
 returned node and authority. -/
 theorem packageTrigger_spec {Δ : Definition} {S : State} {I : List PackageId} {v : NodeId}
     {α : Authority} (h : packageTrigger? Δ S I = some (v, α)) :
-    I ≠ [] ∧ ∀ p ∈ I, InputOK S v α p := by
+    I ≠ [] ∧ I.Nodup ∧ ∀ p ∈ I, InputOK S v α p := by
   simp only [packageTrigger?, bind, Option.bind_eq_some_iff, guard_eq_some] at h
-  obtain ⟨p₀, hp₀, r₀, _, d₀, _, _, _, edges, hedges, _, _, nd, _, h⟩ := h
+  obtain ⟨p₀, hp₀, r₀, _, d₀, _, _, hnodup, edges, hedges, _, _, nd, _, h⟩ := h
   have hva : d₀.receiver = v ∧ r₀.authority = α := by
     split at h <;>
       simp only [Option.bind_eq_some_iff, guard_eq_some, exists_const, pure,
         Option.some.injEq, Prod.mk.injEq] at h <;>
       exact h.2
   obtain ⟨rfl, rfl⟩ := hva
-  refine ⟨fun hI => by simp [hI] at hp₀, fun p hp => ?_⟩
+  refine ⟨fun hI => by simp [hI] at hp₀, hnodup, fun p hp => ?_⟩
   obtain ⟨e, _, he⟩ := (mapM_some hedges).1 p hp
   exact inputEdge_spec he
 
 /-- The facts a trigger's admission establishes. -/
-structure TriggerSpec (S : State) (v : NodeId) (α : Authority) (t : Trigger) : Prop where
+structure TriggerSpec (Δ : Definition) (S : State) (v : NodeId) (α : Authority) (t : Trigger) :
+    Prop where
   pkgs_ne : ∀ I, t = .pkgs I → I ≠ []
+  pkgs_nodup : ∀ I, t = .pkgs I → I.Nodup
   orig_node : ∀ w β, t = .orig w β → v = w
+  orig_sub : ∀ w β, t = .orig w β → β ⊆ Δ.schema.tags
   inputs : ∀ p ∈ t.inputs, InputOK S v α p
 
 /-- An admitted trigger satisfies `TriggerSpec` for the node and authority it returns. -/
 theorem trigger_spec {Δ : Definition} {S : State} {t : Trigger} {v : NodeId} {α : Authority}
-    (h : trigger? Δ S t = some (v, α)) : TriggerSpec S v α t := by
+    (h : trigger? Δ S t = some (v, α)) : TriggerSpec Δ S v α t := by
   cases t with
   | orig w β =>
     simp only [trigger?, rootTrigger?, bind, Option.bind_eq_some_iff, guard_eq_some, pure,
       Option.some.injEq, Prod.mk.injEq] at h
-    obtain ⟨_, _, _, _, _, _, _, _, rfl, rfl⟩ := h
-    refine ⟨?_, ?_, ?_⟩
+    obtain ⟨_, _, _, hsub, _, _, _, _, rfl, rfl⟩ := h
+    refine ⟨?_, ?_, ?_, ?_, ?_⟩
+    · intro _ h
+      cases h
     · intro _ h
       cases h
     · intro _ _ h
       cases h
       rfl
+    · intro _ _ h
+      cases h
+      exact hsub
     · intro _ h
       simp [Trigger.inputs] at h
   | pkgs I =>
-    obtain ⟨hne, hin⟩ := packageTrigger_spec h
-    refine ⟨?_, ?_, hin⟩
+    obtain ⟨hne, hnodup, hin⟩ := packageTrigger_spec h
+    refine ⟨?_, ?_, ?_, ?_, hin⟩
     · intro _ h
       cases h
       exact hne
+    · intro _ h
+      cases h
+      exact hnodup
+    · intro _ _ h
+      cases h
     · intro _ _ h
       cases h
 
@@ -181,7 +194,7 @@ structure Admissible (Δ : Definition) (S : State) (a : ActivationId) (act : Act
     (α : Authority) (outs : List (Output × PackageRecord)) : Prop where
   fresh : S.activations a = none
   node_mem : act.node ∈ Δ.nodes
-  trigger : TriggerSpec S act.node α act.trigger
+  trigger : TriggerSpec Δ S act.node α act.trigger
   outputs_eq : act.outputs = outs.map Prod.fst
   outputs : ∀ x ∈ outs, OutSpec Δ act.node x.1 x.2
 

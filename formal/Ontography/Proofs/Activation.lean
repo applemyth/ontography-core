@@ -145,7 +145,8 @@ theorem wf_accept (hΔ : Δ.Admitted) (hS : WF Δ S) (hA : Admissible Δ S a act
     by_cases hba : b = a
     · rw [ite_eq_left hba, Option.some.injEq] at hb
       subst hb
-      exact ⟨hA.trigger.pkgs_ne, hA.trigger.orig_node⟩
+      exact ⟨fun I h => ⟨hA.trigger.pkgs_ne I h, hA.trigger.pkgs_nodup I h⟩,
+        fun w β h => ⟨hA.trigger.orig_node w β h, hA.trigger.orig_sub w β h⟩⟩
     · rw [ite_eq_right hba] at hb
       exact hS.triggers b act' hb
   delivery := by
@@ -232,6 +233,7 @@ theorem wf_accept (hΔ : Δ.Admitted) (hS : WF Δ S) (hA : Admissible Δ S a act
       exact hS.used_nodes hA.node_mem
     · exact hS.activation_nodes_used b act' hb
   edge_log_nodes := hS.edge_log_nodes
+  used_nonempty := hS.used_nonempty
   causal_order := by
     intro p r b h hst
     show (S.activationIds ++ [a]).idxOf p.producer < (S.activationIds ++ [a]).idxOf b

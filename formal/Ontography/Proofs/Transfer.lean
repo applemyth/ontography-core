@@ -4,7 +4,7 @@ import Ontography.Proofs.Basic
 # Transfer preserves the invariants
 
 Transfer changes one record: a live package with no delivery gains the delivery `⟨e, t(e)⟩`,
-and the revision advances. `Frame.wf_setRecord` covers everything else, so what remains is the
+and the revision advances. `Common.wf_setRecord` covers everything else, so what remains is the
 new delivery. It is an admitted edge leaving the producer's node (I3); its receiver is a node
 and the edge is incoming to it (I5); and since the package's output had no birth edge, the
 package is one more explicit transfer (I6).
@@ -15,7 +15,7 @@ namespace Ontography.Proofs
 variable {accepts : ContractId → Bytes → Bool} {H : Bytes → Digest} {Δ : Definition}
   {S S' : State}
 
-namespace Frame
+namespace Common
 
 /-- The premises of a transfer the invariants rely on, and its successor. -/
 theorem transfer_eq_some {p : PackageId} {e : EdgeId} {payload : Bytes}
@@ -28,9 +28,9 @@ theorem transfer_eq_some {p : PackageId} {e : EdgeId} {payload : Bytes}
   obtain ⟨r, hr, hlive, hnone, edge, hedge, hsrc, -, -, -, -, -, -, -, -, rfl⟩ := h
   exact ⟨r, edge, hr, hlive, hnone, hedge, hsrc, rfl⟩
 
-end Frame
+end Common
 
-open Frame
+open Common
 
 /-- Transfer preserves every invariant. -/
 theorem wf_transfer (hΔ : Δ.Admitted) (hS : WF Δ S) {p : PackageId} {e : EdgeId}

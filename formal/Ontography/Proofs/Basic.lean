@@ -12,7 +12,7 @@ retirement both have this shape, so each discharges only the obligations of the 
 changes.
 -/
 
-namespace Ontography.Proofs.Frame
+namespace Ontography.Proofs.Common
 
 /-! ## Point updates -/
 
@@ -242,6 +242,7 @@ theorem wf_setRecord (hS : WF Δ S) (hr : S.packages p = some r) (hlive : r.stat
       edge_log_ids := hS.edge_log_ids
       activation_nodes_used := hS.activation_nodes_used
       edge_log_nodes := hS.edge_log_nodes
+      used_nonempty := hS.used_nonempty
       causal_order := ?_
       schema_closure := ?_ }
   · -- I1
@@ -322,4 +323,4 @@ theorem wf_setRecord (hS : WF Δ S) (hr : S.packages p = some r) (hlive : r.stat
 
 end Record
 
-end Ontography.Proofs.Frame
+end Ontography.Proofs.Common

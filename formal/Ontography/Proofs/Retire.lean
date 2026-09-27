@@ -5,7 +5,7 @@ import Ontography.Proofs.Basic
 
 Explicit retirement changes one record: a live package becomes
 `retired ⟨.explicit, S.revision + 1, evidence⟩`, and the revision advances.
-`Frame.wf_setRecord` covers everything else, so what remains is the new retirement. Its
+`Common.wf_setRecord` covers everything else, so what remains is the new retirement. Its
 evidence is an accepted activation, and its stamp is the new revision, which exceeds every
 earlier retirement stamp and every recorded definition change (I4). The package is one more
 explicit retirement (I6).
@@ -15,7 +15,7 @@ namespace Ontography.Proofs
 
 variable {Δ : Definition} {S S' : State}
 
-namespace Frame
+namespace Common
 
 /-- The premises of an explicit retirement, and its successor. -/
 theorem retire_eq_some {p : PackageId} {evidence : Option ActivationId}
@@ -30,9 +30,9 @@ theorem retire_eq_some {p : PackageId} {evidence : Option ActivationId}
   subst ha
   simpa using hev
 
-end Frame
+end Common
 
-open Frame
+open Common
 
 -- Retirement uses no fact about `Δ`: `hΔ` is unused, and kept so that the statement is
 -- exactly `Ontography.wf_retire`.

@@ -52,8 +52,8 @@ theorem sysStep_revision {op : SysOp} (h : sysStep accepts H grammar Δ S op = s
 
 /-- Rewrites and extensions change no accepted activation, no package's immutable facts, no
 delivery once made, and no status once no longer live; lifetime records only grow. -/
-theorem sysStep_frame {op : SysOp} (h : sysStep accepts H grammar Δ S op = some (Δ', S')) :
-    Frame S S' := by
+theorem sysStep_frame (hS : WF Δ S) {op : SysOp}
+    (h : sysStep accepts H grammar Δ S op = some (Δ', S')) : Frame S S' := by
   sorry
 
 /-- T6 Freshness: a new definition's nodes and edges are current ones or identities never
