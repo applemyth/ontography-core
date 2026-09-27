@@ -3,6 +3,7 @@ import Ontography.Runs
 import Ontography.Checkpoint
 import Ontography.Replay
 import Ontography.Proofs.Runs
+import Ontography.Proofs.Replay
 
 /-!
 # Metatheory
@@ -109,8 +110,8 @@ every payload it used, reproduces the state exactly. -/
 theorem replay_history (hΔ : Δ.Admitted) {payloads : List Bytes}
     (hrun : ActivationRun accepts H Δ S payloads) {evidence : Digest → Option Bytes}
     (hevidence : ∀ b ∈ payloads, evidence (H b) = some b) :
-    replay accepts H Δ S.history evidence = some S := by
-  sorry
+    replay accepts H Δ S.history evidence = some S :=
+  Proofs.replay_history hΔ hrun hevidence
 
 end
 
