@@ -2,14 +2,15 @@
 
 This document is the normative specification for the dynamic state model of
 the kernel: the package record, the state, the transition relation, the views a
-storage adapter must supply, and the theorems that tests pin. The fixed-graph
-calculus in the sibling mathematical definition is unchanged; this document
-extends it to transfer, retirement, rewriting, and vocabulary extension.
+storage adapter must supply, and the theorems that tests pin. The separate
+[mathematical definition](../MATHEMATICAL_DEFINITION.md) specifies graph
+admission and the activation, transfer, retirement, rewriting, and vocabulary
+extension rules for this checkout.
 
-Notation follows the mathematical definition: `A` is the set of accepted
-activations, `P` the package population, `Δ` the admitted definition with
-graph `G = (V, E)`, and `H` the activation history. `producer(p)` and `O_a`
-are as defined there.
+Here `A` and `P` denote the identity sets of the mathematical definition's
+activation and package maps, `Δ` the admitted definition with graph `G = (V, E)`,
+and `H` the activation history. `producer(p)` and `O_a` are the producing
+activation and its output map, as defined there.
 
 ## 1. Package record
 
