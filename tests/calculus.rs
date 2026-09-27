@@ -2420,6 +2420,62 @@ fn restoration_requires_bytes_matching_each_package_commitment() {
 }
 
 #[test]
+fn restoration_rejects_a_recorded_node_that_disagrees_with_its_trigger() {
+    let fixture = make_fixture();
+    let evidence = authority([fixture.evidence]);
+    let kernel = make_kernel([], [source_root(evidence.clone())]);
+    let mut state = kernel.empty_state();
+    let mut root = ActivationProposal::root("source", evidence, payload(b"result:root"));
+    root.emit(Emission::new(
+        "source.review",
+        OutputAuthority::Carry,
+        payload(b"evidence:node"),
+    ));
+    let root_id = kernel.activate(&mut state, root).expect("root");
+    let package_id = only_package_id(&state);
+    let review_id = kernel
+        .activate(
+            &mut state,
+            ActivationProposal::package(package_id, payload(b"result:reviewed")),
+        )
+        .expect("review");
+    let payloads = payload_evidence!(b"evidence:node");
+    assert_eq!(
+        kernel
+            .restore_state(state.to_parts().expect("fixed-graph history"), &payloads)
+            .expect("untampered history restores"),
+        state
+    );
+
+    // A root's trigger names its node; a package trigger implies its inputs'
+    // receiver. Each recorded node is checked against the implied one.
+    for (activation_id, declared, actual) in [
+        (root_id, "review", "source"),
+        (review_id, "source", "review"),
+    ] {
+        let mut activations = state.activations().clone();
+        let record = &activations[&activation_id];
+        let forged = Activation::new(
+            declared,
+            record.trigger().clone(),
+            Arc::clone(record.result()),
+            record.package_outputs().clone(),
+        );
+        activations.insert(activation_id, forged);
+        assert_eq!(
+            kernel.restore_state(state_parts_with(&kernel, activations), &payloads),
+            Err(StateRestoreError::InvalidActivation {
+                activation_id,
+                source: Box::new(Reject::ExecutionNodeMismatch {
+                    declared: Arc::from(declared),
+                    actual: Arc::from(actual),
+                }),
+            })
+        );
+    }
+}
+
+#[test]
 fn live_and_restored_records_share_the_same_rejection_reason() {
     let fixture = make_fixture();
     let evidence = authority([fixture.evidence]);

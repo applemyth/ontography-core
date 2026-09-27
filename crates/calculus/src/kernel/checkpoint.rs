@@ -906,6 +906,139 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_validates_activation_triggers_against_consumption_records() {
+        let run = AuthorityTag::new("run").unwrap();
+        let spare = AuthorityTag::new("spare").unwrap();
+        let wide = Authority::new([run.clone(), spare.clone()]);
+        let kernel = Kernel::admit(
+            DefinitionId::new("inputs").unwrap(),
+            Schema::new(["node"], ["value"], [run.clone(), spare]).unwrap(),
+            Graph::new(
+                ["A", "B", "C"].map(|node| Node::new(node).unwrap()),
+                [
+                    Edge::new("ab", "A", "B").unwrap(),
+                    Edge::new("ac", "A", "C").unwrap(),
+                ],
+            )
+            .unwrap(),
+            [Contract::new("value", "value", |_| Ok(())).unwrap()],
+            ["A", "B", "C"].map(|node| NodeDefinition::new(node, ["node"], "value").unwrap()),
+            ["ab", "ac"].map(|edge| {
+                EdgeDefinition::new(edge, ["flow"], ["node"], ["node"], "value", [run.clone()])
+                    .unwrap()
+            }),
+            [],
+            [RootRule::new("A", wide.clone()).unwrap()],
+        )
+        .unwrap();
+        let bytes: Payload = Arc::from(b"value".as_slice());
+        let deliver = |state: &mut State, edge: &str, authority: Authority| {
+            let mut proposal = ActivationProposal::root("A", authority, Arc::clone(&bytes));
+            proposal.emit(Emission::new(
+                edge,
+                OutputAuthority::Carry,
+                Arc::clone(&bytes),
+            ));
+            let root = kernel.activate(state, proposal).unwrap();
+            state.activation(root).unwrap().outputs().next().unwrap()
+        };
+        let mut state = kernel.empty_state();
+        let outbound = emit(&kernel, &mut state, false);
+        let input = emit(&kernel, &mut state, true);
+        let elsewhere = deliver(&mut state, "ac", Authority::new([run]));
+        let wider = deliver(&mut state, "ab", wide);
+        // The greatest identity sorts last, so every producer's records are
+        // checked before the consumer's trigger.
+        let consumer = ActivationId::from_u128(u128::MAX);
+        let transition = kernel
+            .evaluate_activation(&state, consumer, ActivationProposal::package(input, bytes))
+            .unwrap();
+        state.apply(&kernel, &transition).unwrap();
+        assert_eq!(
+            kernel.restore_checkpoint(state.checkpoint()).unwrap(),
+            state
+        );
+
+        let rejects = |mutate: &dyn Fn(&mut Checkpoint)| {
+            let mut invalid = state.checkpoint();
+            mutate(&mut invalid);
+            kernel.restore_checkpoint(invalid).unwrap_err()
+        };
+        // The consumer claims one more input, recorded as consumed by it or not.
+        let claim = |c: &mut Checkpoint, package: PackageId, consumed: bool| {
+            let Trigger::Pkgs { package_ids } =
+                &mut c.activations.get_mut(&consumer).unwrap().trigger
+            else {
+                panic!("package-triggered fixture");
+            };
+            package_ids.insert(package);
+            if consumed {
+                c.packages.get_mut(&package).unwrap().status = PackageStatus::Consumed(consumer);
+            }
+        };
+        let root = input.producer();
+
+        assert_eq!(
+            rejects(&|c| {
+                c.activations.get_mut(&root).unwrap().trigger = Trigger::Orig {
+                    node_id: Arc::from("A"),
+                    authority: Authority::new([AuthorityTag::new("foreign").unwrap()]),
+                };
+            }),
+            CheckpointError::Activation("root authority is outside the schema")
+        );
+        assert_eq!(
+            rejects(&|c| {
+                c.activations.get_mut(&root).unwrap().trigger = Trigger::Pkgs {
+                    package_ids: BTreeSet::new(),
+                };
+            }),
+            CheckpointError::Activation("activation has no input packages")
+        );
+        // The claim names a known producer, so consumption stays acyclic, but
+        // that producer recorded no such output.
+        assert_eq!(
+            rejects(&|c| claim(c, PackageId::from_parts(root, input.output() + 1), false)),
+            CheckpointError::Consumption("activation input is unknown")
+        );
+        assert_eq!(
+            rejects(&|c| claim(c, outbound, false)),
+            CheckpointError::Consumption("activation input was never delivered")
+        );
+        assert_eq!(
+            rejects(&|c| c.packages.get_mut(&input).unwrap().status = PackageStatus::Live),
+            CheckpointError::Consumption("activation input is not consumed by it")
+        );
+        // `elsewhere` differs from `input` only in custody, `wider` only in
+        // authority.
+        let disagree =
+            CheckpointError::Consumption("activation inputs disagree on custody or authority");
+        assert_eq!(rejects(&|c| claim(c, elsewhere, true)), disagree);
+        assert_eq!(rejects(&|c| claim(c, wider, true)), disagree);
+        for (id, node) in [(root, "B"), (consumer, "A")] {
+            assert_eq!(
+                rejects(&|c| c.activations.get_mut(&id).unwrap().node_id = Arc::from(node)),
+                CheckpointError::Consumption("recorded execution node disagrees with trigger")
+            );
+        }
+        // A consumed package must be delivered and an input of an accepted
+        // package-triggered consumer. The undelivered claim is caught at its
+        // producer, which precedes the consumer.
+        let unclaimed =
+            CheckpointError::Consumption("consumed package is not an input of its consumer");
+        for claimant in [consumer, root, ActivationId::from_u128(7)] {
+            assert_eq!(
+                rejects(&|c| {
+                    c.packages.get_mut(&elsewhere).unwrap().status =
+                        PackageStatus::Consumed(claimant);
+                }),
+                unclaimed
+            );
+        }
+        assert_eq!(rejects(&|c| claim(c, outbound, true)), unclaimed);
+    }
+
+    #[test]
     fn checkpoint_accepts_a_removed_holder_recorded_by_node_replacement() {
         let (initial, _) = fixture();
         let mut state = initial.empty_state();
