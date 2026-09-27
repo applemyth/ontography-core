@@ -95,7 +95,11 @@ The model differs from the kernel's data structures in ways that do not change t
 
 ## Checking the kernel
 
-`tests/lean_oracle.rs` drives the Rust kernel with random operations and writes each run as
-a JSON trace ([TRACE_FORMAT.md](TRACE_FORMAT.md)). The `oracle` executable built from this
-directory replays the trace through the model, and the test fails on any disagreement in
-acceptance or in the resulting state. Build the oracle with `lake build oracle`.
+`tests/lean_oracle.rs` drives the Rust kernel with random activations, transfers,
+retirements, rewrites, and extensions over a fixed grammar menu, and writes each run as a
+JSON trace ([TRACE_FORMAT.md](TRACE_FORMAT.md)). The `oracle` executable built from this
+directory replays the trace through the model's `sysStep`, and the test fails on any
+disagreement in acceptance or in the resulting state, which includes the current definition.
+A required prefix pins the rule cases and the kernel scenarios of `Examples.lean`; stale
+prepared plans have no model counterpart and are checked against the kernel alone. Build the
+oracle with `lake build oracle`; `ONTOGRAPHY_LEAN_ORACLE_SEEDS` adds seeds.
