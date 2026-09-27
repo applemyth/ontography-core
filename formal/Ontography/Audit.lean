@@ -25,4 +25,5 @@ elab "#assert_standard_axioms " id:ident : command => do
 #assert_standard_axioms Ontography.wf_step
 #assert_standard_axioms Ontography.wf_of_reachable
 #assert_standard_axioms Ontography.step_revision
+#assert_standard_axioms Ontography.step_frame
 #assert_standard_axioms Ontography.causal_acyclic

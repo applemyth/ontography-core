@@ -3,6 +3,7 @@ import Ontography.Proofs.Activation
 import Ontography.Proofs.Transfer
 import Ontography.Proofs.Retire
 import Ontography.Proofs.Revision
+import Ontography.Proofs.StepFrame
 import Ontography.Proofs.Acyclic
 
 /-!
@@ -60,8 +61,8 @@ once made, and no status once no longer live; a fixed-definition transition keep
 lifetime records. -/
 theorem step_frame (hS : WF Δ S) {op : Op} (h : step accepts H Δ S op = some S') :
     Frame S S' ∧ S'.usedNodes = S.usedNodes ∧ S'.edgeLog = S.edgeLog ∧
-      S'.changeLog = S.changeLog := by
-  sorry
+      S'.changeLog = S.changeLog :=
+  Proofs.step_frame hS h
 
 /-- The causal history is acyclic, even when the workflow graph has cycles. -/
 theorem causal_acyclic (hS : WF Δ S) (b : ActivationId) :
