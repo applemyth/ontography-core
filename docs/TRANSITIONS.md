@@ -271,8 +271,11 @@ only as far as a state records it: a delivery on a removed edge must name a
 used edge identity and a used receiver and agree with every other delivery
 over that edge on its endpoints, but its incidence at the revision of delivery
 is not recorded and is trusted. With these checks restoration checks exactly
-I1–I7: some well-formed state, up to acceptance order, records every
-checkpoint it accepts. Fixed-graph
+I1–I7: `checkpoint_exact` proves that a checkpoint passes if and only if some
+well-formed state records it, up to the order of its identity lists. I1–I7 are
+not the strongest decidable invariants; the model's README lists consequences
+of admission that reachable states also satisfy and restoration does not yet
+check. Fixed-graph
 restoration (`restore_state`) replays every rule from the activation records
 alone. Export through `to_parts` is available only when there have been no
 definition changes, transfers, or retirements; exact revision accounting then
@@ -283,9 +286,13 @@ do not independently authenticate an omitted or altered history.
 
 T1–T3 are properties of this implementation and are pinned by tests. T4–T6 are
 properties of the calculus: the Lean model in [formal/](../formal/README.md)
-proves them for every validator and grammar, and tests pin that the kernel
-behaves as the model does. The model proves the invariants I1–I7 themselves as
-`wf_of_sysReachable`.
+proves them for every validator and grammar. A differential test checks the
+kernel's transitions of every kind against the model; the replay and checkpoint
+results describe `restore_state` and `restore_checkpoint` through a reviewed
+correspondence pinned by the kernel's own tests. The model proves the
+invariants I1–I7 themselves as `wf_of_sysReachable`, with I3's timing, that a
+delivery is made over an edge of the definition in force, as
+`sysStep_delivery`.
 
 - **T1 Partition and shape.** The status partition and the one-kind-per-
   transition shape hold by type. Tests pin that every evaluator's output

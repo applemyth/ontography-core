@@ -49,15 +49,18 @@ Each holds for every validator, commitment function, and rewrite grammar.
   activations, immutable package facts, deliveries once made, or settled statuses, and a new
   definition introduces only identities never used before.
 - `causal_acyclic`: the causal history is acyclic.
+- `sysStep_delivery`: each delivery is made over an edge of the definition in force when it
+  is made, the timing that I3 states and a single state cannot record.
 - `rewrite_local`, `rewrite_commute` (T4): a rewrite changes only packages at holders it
   affects; when both orders of two rewrites apply, they yield the same definition, and if
-  their affected holders are disjoint they commute on every package up to retirement stamps.
+  their affected holders are disjoint across both application orders they commute on every
+  package up to retirement stamps.
 - `sysSteps_frame`, `activation_persists`, `accepted_not_reaccepted`, `sysStep_newborn`,
   `removed_node_never_returns`, `removed_edge_never_returns` (T6): no activation, package,
   node, or edge identity is ever reused.
-- `checkpoint_of_wf`, `checkpoint_sound`: checkpoint restoration checks exactly the
-  invariants — it accepts a checkpoint exactly when some well-formed state records it, up
-  to acceptance order.
+- `checkpoint_exact`, with `checkpoint_of_wf` and `checkpoint_sound`: checkpoint
+  restoration checks exactly the invariants — a checkpoint passes if and only if some
+  well-formed state records it, up to the order of its identity lists.
 - `replay_history`, `replay_causal`, `replay_sound`, `activationRun_of_revision` (T5):
   replay accepts only faithful histories and, in any causal order, reproduces a state
   reached by activations alone, which `revision = |A|` identifies.
@@ -75,23 +78,53 @@ The theorems assume nothing about these, so they hold for every choice:
 - **Fresh identities.** The kernel draws activation identities at random; the model takes them
   as inputs, and admission requires them to be fresh.
 
-Outside the model: the SQLite adapter, checked against the in-memory kernel by
-`tests/adapter_equivalence.rs`; the Rust kernel, checked against the model by the
-differential test; and Lean's kernel, which checks the proofs.
+Outside the model:
+
+- the Rust kernel's transitions, checked against the model by the differential test below;
+- the kernel's restorations `restore_state` and `restore_checkpoint`, which the replay and
+  checkpoint theorems describe through a correspondence established by review and pinned by
+  the kernel's own tests, not by the differential test;
+- the oracle's trace codec in `Oracle/`, which is ordinary unproved Lean;
+- the SQLite adapter, checked against the in-memory kernel by
+  `tests/adapter_equivalence.rs`;
+- and Lean's kernel, which checks the proofs.
 
 ## Representation choices
 
 The model differs from the kernel's data structures in ways that do not change the law:
 
-- Lists stand for sets, and authorities and vocabularies are compared as sets.
+- Lists stand for sets: the rules compare authorities and vocabularies as sets. Two
+  structural checks compare lists exactly — a record's authority against its output's, and
+  replay's reconstruction of `Carry` — which agrees with the kernel because its authorities
+  are sorted, duplicate-free sets.
+- The order of `activationIds` and `packageIds` is the model's; the kernel's maps record
+  none, which is why the checkpoint and replay results hold up to permutation.
 - A package trigger's inputs are a duplicate-free list; a kernel proposal is a set.
-- Output `i` of activation `a` is package `(a, i)`, as live evaluation numbers them.
+- Output `i` of activation `a` is package `(a, i)`, as live evaluation numbers them. The
+  kernel's restorations accept any distinct numbering, so the model describes them up to
+  renumbering.
 - Revisions are unbounded naturals, so the kernel's `u64` headroom check has no counterpart.
 - Rejection is `none`: which premise failed is not part of the law.
 - The fingerprint, binding, and nonce are implementation fences and are not modeled.
 - `edgeLog` keeps every admitted edge with its incidence and `changeLog` the revision of each
   definition change. The kernel stores only their identities and length; the richer records
   make I3 and the stamp rules properties of one state.
+
+## Stronger invariants not yet stated
+
+`WF` is not the strongest decidable invariant of reachable states. Because a surviving
+identity keeps its annotations and policies and a delivery never changes, reachable states
+also satisfy these, which neither `WF` nor checkpoint restoration checks yet:
+
+- a `RouteRemoved` receipt's delivery edge is no longer a current incoming edge of its holder;
+- a root activation at a current node is permitted by that node's current root rule;
+- the inputs of an activation have distinct delivery edges;
+- an output born over a current edge satisfies that edge's authority condition, and one whose
+  authority differs from its activation's governing authority has a current transition rule.
+
+Each is preserved by every transition. Adding them to `WF`, `CheckpointValid`, and the
+kernel's `restore_checkpoint` would make restoration reject the corresponding tampered
+checkpoints, which it accepts today.
 
 ## Checking the kernel
 

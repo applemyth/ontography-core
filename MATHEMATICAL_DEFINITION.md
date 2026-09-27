@@ -350,8 +350,8 @@ acyclicity:
   delivered packages can be consumed, at most once, and consumed inputs share
   their activation's recorded node and governing authority.
 - I3: every delivery names an edge from the producer's node to the receiver
-  that was admitted in the state's lifetime; the rules deliver only over an
-  edge of the current definition.
+  that was admitted in the state's lifetime, and each delivery is made over an
+  edge of the definition in force when it is made.
 - I4: a retirement's reason admits the package's phase, only an explicit
   retirement carries evidence, and every stamp is a past revision: distinct for
   explicit retirements, a definition change for structural ones. A removed
@@ -369,7 +369,8 @@ a run, an identity that leaves the graph never returns.
 
 Model: `WF` and `Frame` in [Invariants.lean](formal/Ontography/Invariants.lean).
 `wf_of_sysReachable` proves the invariants of every reachable workflow and
-`causal_acyclic` its acyclicity; `step_frame` and `sysStep_frame` prove the
+`causal_acyclic` its acyclicity, and `sysStep_delivery` the timing in I3;
+`step_frame` and `sysStep_frame` prove the
 per-transition properties; `activation_persists`, `removed_node_never_returns`,
 and `removed_edge_never_returns` prove the run properties.
 
@@ -404,10 +405,11 @@ those facts does not make a worker's external side effects transactional.
 Model: `replay_history` and `replay_causal` prove that replaying the history
 of a state reached by activations alone, in any causal order, reproduces it up
 to the order of acceptance; `replay_sound` that replay accepts only faithful
-histories; and `activationRun_of_revision` that `r = |A|` identifies such
-states. `checkpoint_of_wf` and `checkpoint_sound` prove that checkpoint
-restoration checks exactly the invariants: it accepts a checkpoint exactly when
-some well-formed state records it, up to acceptance order. See
+histories; and `activationRun_of_revision` that a reachable workflow with
+`r = |A|` was reached by activations alone. `checkpoint_exact` proves that
+checkpoint restoration checks exactly the invariants: a checkpoint passes if and
+only if some well-formed state records it, up to the order of its identity
+lists. See
 [restoration](crates/calculus/src/kernel/checkpoint.rs),
 [prepared-plan tests](tests/prepared_plans.rs),
 [negative verification tests](tests/verify_negative.rs), and

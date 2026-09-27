@@ -12,8 +12,9 @@ Two fields record strictly more than the kernel's `State` does, so that every
 invariant is a property of one state rather than of its history:
 
 * `edgeLog` keeps each edge ever admitted together with its incidence. Its
-  identities are the kernel's `used_edge_ids`, and it lets I3 ("an edge admitted
-  at the revision of delivery") be checked on a state.
+  identities are the kernel's `used_edge_ids`, and it lets I3's incidence claim be
+  checked on a state; `sysStep_delivery` proves that each delivery is made over an
+  edge of the definition in force.
 * `changeLog` keeps the revision of each definition change. Its length is the
   kernel's `definition_changes`, and it states exactly which revisions
   structural retirements may carry.
