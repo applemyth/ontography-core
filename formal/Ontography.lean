@@ -7,3 +7,5 @@ import Ontography.Theorems
 import Ontography.Rewrite
 import Ontography.System
 import Ontography.SystemTheorems
+import Ontography.Metatheory
+import Ontography.Examples
