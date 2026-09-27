@@ -8,6 +8,12 @@ import Ontography.Proofs.ActivationLemmas
 What `structural?` guarantees about its replacement, what `cleanup?` reads, and how both
 respect `Definition.Equiv`, for the proofs in `Ontography.Proofs.Commutation`.
 
+`replace pr m Δ` is the replacement `structural?` builds for a match `m` of `pr` in `Δ`: `Δ`
+without what `m` binds outside the interface, plus `R ∖ K` under `m`'s fresh identities.
+Neither the deleted part nor the added part reads `Δ`, so two replacements commute, as sets,
+when neither deletes what the other adds (`replace_comm`). A successful `structural?` deletes
+only current identities and adds only unused ones (`structural?_replace`).
+
 `Shape` records the facts of a successful `structural?` that cleanup depends on: the deleted
 nodes are a function of the production and the match, and the replacement keeps the
 contracts and every retained node and edge with its annotation, and gives its new nodes and
@@ -105,6 +111,41 @@ theorem eq_nil_congr {l₁ l₂ : List α} (hmem : ∀ x, x ∈ l₁ ↔ x ∈ l
   rw [List.eq_nil_iff_forall_not_mem, List.eq_nil_iff_forall_not_mem]
   exact ⟨fun h x hx => h x ((hmem x).2 hx), fun h x hx => h x ((hmem x).1 hx)⟩
 
+theorem setEq_refl (a : List α) : SetEq a a := ⟨List.Subset.refl _, List.Subset.refl _⟩
+
+/-- A lookup by a unique key finds the entry that has it. -/
+theorem lookup_of_mem [BEq α] [LawfulBEq α] :
+    ∀ {l : List (α × β)} {b : α × β}, (l.map Prod.fst).Nodup → b ∈ l → l.lookup b.1 = some b.2
+  | [], _, _, hb => by simp at hb
+  | (k, v) :: l, b, hnd, hb => by
+    rw [List.map_cons, List.nodup_cons] at hnd
+    rcases List.mem_cons.1 hb with rfl | hb'
+    · simp [List.lookup]
+    · have hne : (b.1 == k) = false := by
+        rw [beq_eq_false_iff_ne]
+        rintro rfl
+        exact hnd.1 (List.mem_map.2 ⟨b, hb', rfl⟩)
+      simp [List.lookup, hne, lookup_of_mem hnd.2 hb']
+
+/-- Filtering by `k₁` and appending `F₁`, then filtering by `k₂` and appending `F₂`, keeps
+nothing the other order drops when `k₁` passes all of `F₂`. -/
+theorem filter_append_subset {l F₁ F₂ : List α} {k₁ k₂ : α → Bool}
+    (h₂ : ∀ x ∈ F₂, k₁ x = true) :
+    (l.filter k₁ ++ F₁).filter k₂ ++ F₂ ⊆ (l.filter k₂ ++ F₂).filter k₁ ++ F₁ := by
+  intro x hx
+  simp only [List.mem_append, List.mem_filter] at hx ⊢
+  rcases hx with ⟨⟨hl, hk₁⟩ | hF₁, hk₂⟩ | hF₂
+  · exact .inl ⟨.inl ⟨hl, hk₂⟩, hk₁⟩
+  · exact .inr hF₁
+  · exact .inl ⟨.inr hF₂, h₂ x hF₂⟩
+
+/-- Two filters and two appends commute, as sets, when neither filter drops what the other
+appends. -/
+theorem setEq_filter_append {l F₁ F₂ : List α} {k₁ k₂ : α → Bool}
+    (h₁ : ∀ x ∈ F₁, k₂ x = true) (h₂ : ∀ x ∈ F₂, k₁ x = true) :
+    SetEq ((l.filter k₁ ++ F₁).filter k₂ ++ F₂) ((l.filter k₂ ++ F₂).filter k₁ ++ F₁) :=
+  ⟨filter_append_subset h₂, filter_append_subset h₁⟩
+
 end Lists
 
 /-! ## Lookups in a definition -/
@@ -199,6 +240,146 @@ theorem not_affected {Δ Δ' : Definition} {v : NodeId} (hv : v ∈ Δ.nodes)
     fun nd hnd hall => Classical.byContradiction fun hn =>
       h ⟨hv, .inr (.inr ⟨⟨nd, hnd, hall⟩, hn⟩)⟩⟩
 
+/-! ## The replacement as a function of the production and the match -/
+
+section Replace
+
+/-- The nodes a match of `pr` deletes: the ones it binds outside the interface. -/
+def deleted (pr : Production) (m : Match) : List NodeId :=
+  (m.nodes.filter (·.1 ∉ pr.interfaceNodes)).map (·.2)
+
+/-- The edges a match of `pr` deletes: the ones it binds outside the interface. -/
+def deletedEdges (pr : Production) (m : Match) : List EdgeId :=
+  (m.edges.filter (·.1 ∉ pr.interfaceEdges)).map (·.2)
+
+/-- The identity a node symbol of `R` receives: its match in the interface, and its fresh
+allocation outside it. -/
+def place (pr : Production) (m : Match) (s : NodeId) : NodeId :=
+  (if s ∈ pr.interfaceNodes then m.nodes.lookup s else m.freshNodes.lookup s).getD s
+
+/-- `R ∖ K` under the match's fresh identities: what a rewrite adds. -/
+def fresh (pr : Production) (m : Match) : Fragment where
+  nodes := m.freshNodes.map (·.2)
+  edges := m.freshEdges.filterMap fun b =>
+    (pr.right.edges.find? (·.id == b.1)).map fun re =>
+      ⟨b.2, place pr m re.source, place pr m re.target⟩
+  nodeDefs := m.freshNodes.filterMap fun b =>
+    (pr.right.nodeDefs.find? (·.node == b.1)).map fun d => { d with node := b.2 }
+  edgeDefs := m.freshEdges.filterMap fun b =>
+    (pr.right.edgeDefs.find? (·.edge == b.1)).map fun d => { d with edge := b.2 }
+  transitions := m.freshNodes.flatMap fun b =>
+    (pr.right.transitions.filter (·.node == b.1)).map fun r => { r with node := b.2 }
+  roots := m.freshNodes.filterMap fun b =>
+    ((pr.right.roots.find? (·.node == b.1)).map (·.ceiling)).map fun c => ⟨b.2, c⟩
+
+/-- The replacement `structural?` builds for a match `m` of `pr` in `Δ`: `Δ` without the
+deleted part, plus the fresh part. Only the part it keeps reads `Δ`. -/
+def replace (pr : Production) (m : Match) (Δ : Definition) : Definition :=
+  { Δ with
+    nodes := Δ.nodes.filter (· ∉ deleted pr m) ++ (fresh pr m).nodes
+    edges := Δ.edges.filter (·.id ∉ deletedEdges pr m) ++ (fresh pr m).edges
+    nodeDefs := Δ.nodeDefs.filter (·.node ∉ deleted pr m) ++ (fresh pr m).nodeDefs
+    edgeDefs := Δ.edgeDefs.filter (·.edge ∉ deletedEdges pr m) ++ (fresh pr m).edgeDefs
+    transitions := Δ.transitions.filter (·.node ∉ deleted pr m) ++ (fresh pr m).transitions
+    roots := Δ.roots.filter (·.node ∉ deleted pr m) ++ (fresh pr m).roots }
+
+variable {pr pr₁ pr₂ : Production} {m m₁ m₂ : Match}
+
+/-- A successful `structural?` builds `replace pr m Δ`, deleting only nodes and edges of `Δ`
+and allocating only identities unused in `S`: `m` binds nodes that `Δ` defines and edges it
+has, and the allocation guards check the fresh ones. -/
+theorem structural?_replace {Δ : Definition} {S : State} {rep : Replacement}
+    (hΔ : Δ.Admitted) (h : structural? Δ S pr m = some rep) :
+    rep.next = replace pr m Δ ∧ (∀ v ∈ deleted pr m, v ∈ Δ.nodes) ∧
+      (∀ e ∈ deletedEdges pr m, e ∈ Δ.edges.map (·.id)) ∧
+      (∀ v ∈ (fresh pr m).nodes, v ∉ S.usedNodes) ∧
+      ∀ e ∈ m.freshEdges.map (·.2), e ∉ S.usedEdges := by
+  simp only [structural?, bind, Option.bind_eq_some_iff, Common.guard_eq_some, exists_const, pure,
+    Option.some.injEq] at h
+  obtain ⟨-, -, -, -, -, -, -, -, ⟨hkeys, hbound, -, -⟩, -, -, hnodes, hedges, hfn, hfe, -, -,
+    rfl⟩ := h
+  refine ⟨rfl, ?_, ?_, ?_, ?_⟩
+  · -- A bound node has a definition in `Δ`, so it is a node of `Δ`.
+    intro v hv
+    obtain ⟨b, hb, rfl⟩ := List.mem_map.1 hv
+    have hsame := hnodes b (List.mem_filter.1 hb).1
+    unfold SameNode at hsame
+    split at hsame
+    next _ d _ hd =>
+      obtain ⟨hmem, hnode⟩ := Common.nodeDef?_mem hd
+      exact hnode ▸ hΔ.nodeDefs_nodes d hmem
+    next => exact hsame.elim
+  · -- A bound edge is the image of an edge of `L`, which is an edge of `Δ`.
+    intro e he
+    obtain ⟨b, hb, rfl⟩ := List.mem_map.1 he
+    have hb := (List.mem_filter.1 hb).1
+    obtain ⟨le, hle, hid⟩ := List.mem_map.1 (hbound.1 (List.mem_map_of_mem hb))
+    obtain ⟨he', hmem, hlk, -⟩ := hedges le hle
+    rw [hid, lookup_of_mem hkeys hb, Option.some.injEq] at hlk
+    exact hlk ▸ List.mem_map_of_mem hmem
+  · intro v hv
+    obtain ⟨b, hb, rfl⟩ := List.mem_map.1 hv
+    exact hfn b hb
+  · intro e he
+    obtain ⟨b, hb, rfl⟩ := List.mem_map.1 he
+    exact hfe b hb
+
+/-! Everything the fresh part adds carries a fresh identity. -/
+
+theorem fresh_edges {e : Edge} (he : e ∈ (fresh pr m).edges) : e.id ∈ m.freshEdges.map (·.2) := by
+  obtain ⟨b, hb, hbe⟩ := List.mem_filterMap.1 he
+  obtain ⟨re, -, rfl⟩ := Option.map_eq_some_iff.1 hbe
+  exact List.mem_map_of_mem hb
+
+theorem fresh_nodeDefs {d : NodeDef} (hd : d ∈ (fresh pr m).nodeDefs) :
+    d.node ∈ (fresh pr m).nodes := by
+  obtain ⟨b, hb, hbd⟩ := List.mem_filterMap.1 hd
+  obtain ⟨d', -, rfl⟩ := Option.map_eq_some_iff.1 hbd
+  exact List.mem_map_of_mem hb
+
+theorem fresh_edgeDefs {d : EdgeDef} (hd : d ∈ (fresh pr m).edgeDefs) :
+    d.edge ∈ m.freshEdges.map (·.2) := by
+  obtain ⟨b, hb, hbd⟩ := List.mem_filterMap.1 hd
+  obtain ⟨d', -, rfl⟩ := Option.map_eq_some_iff.1 hbd
+  exact List.mem_map_of_mem hb
+
+theorem fresh_transitions {t : TransitionRule} (ht : t ∈ (fresh pr m).transitions) :
+    t.node ∈ (fresh pr m).nodes := by
+  obtain ⟨b, hb, ht⟩ := List.mem_flatMap.1 ht
+  obtain ⟨t', -, rfl⟩ := List.mem_map.1 ht
+  exact List.mem_map_of_mem hb
+
+theorem fresh_roots {r : RootRule} (hr : r ∈ (fresh pr m).roots) :
+    r.node ∈ (fresh pr m).nodes := by
+  obtain ⟨b, hb, hbr⟩ := List.mem_filterMap.1 hr
+  obtain ⟨c, -, rfl⟩ := Option.map_eq_some_iff.1 hbr
+  exact List.mem_map_of_mem hb
+
+/-- Two replacements commute, as sets, when neither deletes what the other adds: both orders
+keep the schema and contracts, and each component becomes the current one without both
+deleted parts, plus both fresh parts. -/
+theorem replace_comm {Δ : Definition}
+    (hn₁ : ∀ v ∈ (fresh pr₁ m₁).nodes, v ∉ deleted pr₂ m₂)
+    (hn₂ : ∀ v ∈ (fresh pr₂ m₂).nodes, v ∉ deleted pr₁ m₁)
+    (he₁ : ∀ e ∈ m₁.freshEdges.map (·.2), e ∉ deletedEdges pr₂ m₂)
+    (he₂ : ∀ e ∈ m₂.freshEdges.map (·.2), e ∉ deletedEdges pr₁ m₁) :
+    (replace pr₂ m₂ (replace pr₁ m₁ Δ)).Equiv (replace pr₁ m₁ (replace pr₂ m₂ Δ)) :=
+  ⟨setEq_refl _, setEq_refl _, setEq_refl _, setEq_refl _,
+    setEq_filter_append (fun v hv => decide_eq_true (hn₁ v hv))
+      (fun v hv => decide_eq_true (hn₂ v hv)),
+    setEq_filter_append (fun _ he => decide_eq_true (he₁ _ (fresh_edges he)))
+      (fun _ he => decide_eq_true (he₂ _ (fresh_edges he))),
+    setEq_filter_append (fun _ hd => decide_eq_true (hn₁ _ (fresh_nodeDefs hd)))
+      (fun _ hd => decide_eq_true (hn₂ _ (fresh_nodeDefs hd))),
+    setEq_filter_append (fun _ hd => decide_eq_true (he₁ _ (fresh_edgeDefs hd)))
+      (fun _ hd => decide_eq_true (he₂ _ (fresh_edgeDefs hd))),
+    setEq_filter_append (fun _ ht => decide_eq_true (hn₁ _ (fresh_transitions ht)))
+      (fun _ ht => decide_eq_true (hn₂ _ (fresh_transitions ht))),
+    setEq_filter_append (fun _ hr => decide_eq_true (hn₁ _ (fresh_roots hr)))
+      (fun _ hr => decide_eq_true (hn₂ _ (fresh_roots hr)))⟩
+
+end Replace
+
 /-! ## The replacement of a successful `structural?` -/
 
 /-- What cleanup depends on in a successful `structural? Δ S pr m`: the deleted nodes are the
@@ -207,7 +388,7 @@ every node, edge, and annotation outside the deleted part, and its new nodes and
 identities unused in `S`. -/
 structure Shape (Δ : Definition) (S : State) (pr : Production) (m : Match)
     (rep : Replacement) : Prop where
-  deleted : rep.deleted = (m.nodes.filter (·.1 ∉ pr.interfaceNodes)).map (·.2)
+  deleted : rep.deleted = Commute.deleted pr m
   admitted : rep.next.Admitted
   contracts : rep.next.contracts = Δ.contracts
   nodes : rep.next.nodes = Δ.nodes.filter (· ∉ rep.deleted) ++ rep.freshNodes
