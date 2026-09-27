@@ -50,6 +50,14 @@ theorem step_revision {op : Op} (h : step accepts H Δ S op = some S') :
     S'.revision = S.revision + 1 := by
   sorry
 
+/-- A transition changes no accepted activation, no package's immutable facts, no delivery
+once made, and no status once no longer live; a fixed-definition transition keeps the
+lifetime records. -/
+theorem step_frame {op : Op} (h : step accepts H Δ S op = some S') :
+    Frame S S' ∧ S'.usedNodes = S.usedNodes ∧ S'.edgeLog = S.edgeLog ∧
+      S'.changeLog = S.changeLog := by
+  sorry
+
 /-- The causal history is acyclic, even when the workflow graph has cycles. -/
 theorem causal_acyclic (hS : WF Δ S) (b : ActivationId) :
     ¬ Relation.TransGen (DependsOn S) b b := by

@@ -50,4 +50,17 @@ theorem sysStep_revision {op : SysOp} (h : sysStep accepts H grammar Δ S op = s
     S'.revision = S.revision + 1 := by
   sorry
 
+/-- Rewrites and extensions change no accepted activation, no package's immutable facts, no
+delivery once made, and no status once no longer live; lifetime records only grow. -/
+theorem sysStep_frame {op : SysOp} (h : sysStep accepts H grammar Δ S op = some (Δ', S')) :
+    Frame S S' := by
+  sorry
+
+/-- T6 Freshness: a new definition's nodes and edges are current ones or identities never
+used before, so a deleted identity never returns. -/
+theorem sysStep_fresh {op : SysOp} (h : sysStep accepts H grammar Δ S op = some (Δ', S')) :
+    (∀ v ∈ Δ'.nodes, v ∈ Δ.nodes ∨ v ∉ S.usedNodes) ∧
+      ∀ e ∈ Δ'.edges, e ∈ Δ.edges ∨ e.id ∉ S.usedEdges := by
+  sorry
+
 end Ontography

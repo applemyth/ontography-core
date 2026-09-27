@@ -37,9 +37,11 @@ structure WF (Δ : Definition) (S : State) : Prop where
   join_authority : ∀ b act, S.activations b = some act →
     ∀ p ∈ act.trigger.inputs, ∀ q ∈ act.trigger.inputs, ∀ r s,
       S.packages p = some r → S.packages q = some s → SetEq r.authority s.authority
-  /-- I2: a package trigger is nonempty, and a root's recorded node is its trigger node. -/
+  /-- I2: a package trigger is a nonempty set, and a root's recorded node is its trigger node,
+  with authority in the schema. -/
   triggers : ∀ b act, S.activations b = some act →
-    (∀ I, act.trigger = .pkgs I → I ≠ []) ∧ ∀ v α, act.trigger = .orig v α → act.node = v
+    (∀ I, act.trigger = .pkgs I → I ≠ [] ∧ I.Nodup) ∧
+      ∀ v α, act.trigger = .orig v α → act.node = v ∧ α ⊆ Δ.schema.tags
   /-- I3 Delivery: a delivery names an edge admitted from the producer's node to the
   receiver, and a birth edge is the package's delivery edge. -/
   delivery : ∀ p r d, S.packages p = some r → r.delivery = some d →
@@ -80,12 +82,26 @@ structure WF (Δ : Definition) (S : State) : Prop where
   identity can never alias one. -/
   activation_nodes_used : ∀ a act, S.activations a = some act → act.node ∈ S.usedNodes
   edge_log_nodes : ∀ e ∈ S.edgeLog, e.source ∈ S.usedNodes ∧ e.target ∈ S.usedNodes
+  /-- I7: lifetime identities are nonempty. -/
+  used_nonempty : (∀ v ∈ S.usedNodes, v ≠ "") ∧ ∀ e ∈ S.edgeLog, e.id ≠ ""
   /-- Causal acyclicity: every input was produced by an earlier activation. -/
   causal_order : ∀ p r b, S.packages p = some r → r.status = .consumed b →
     S.activationIds.idxOf p.producer < S.activationIds.idxOf b
   /-- Schema closure: object types and carried authority are in the schema. -/
   schema_closure : ∀ p r, S.packages p = some r →
     r.objectType ∈ Δ.schema.objectTypes ∧ r.authority ⊆ Δ.schema.tags
+
+/-- What no transition changes: accepted activations, each package's immutable facts, a
+delivery once made, a status once no longer live, and the lifetime records, which only grow. -/
+structure Frame (S S' : State) : Prop where
+  activations : ∀ a act, S.activations a = some act → S'.activations a = some act
+  packages : ∀ p r, S.packages p = some r → ∃ r', S'.packages p = some r' ∧
+    r'.objectType = r.objectType ∧ r'.authority = r.authority ∧ r'.digest = r.digest ∧
+    r'.producerNode = r.producerNode ∧ (r.delivery ≠ none → r'.delivery = r.delivery) ∧
+    (r.status ≠ .live → r'.status = r.status)
+  usedNodes : S.usedNodes ⊆ S'.usedNodes
+  edgeLog : S.edgeLog ⊆ S'.edgeLog
+  changeLog : S.changeLog ⊆ S'.changeLog
 
 /-- `b` consumed an output of `a`: the arcs `a → p → b` of the causal history `H_S`. -/
 def DependsOn (S : State) (b a : ActivationId) : Prop :=

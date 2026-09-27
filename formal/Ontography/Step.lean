@@ -16,6 +16,12 @@ The model takes the fresh activation identity as an input, as the kernel's
 evaluators do; the kernel draws it at random. Output `i` of activation `a` is
 package `(a, i)`, which is how live evaluation allocates them. Revisions are
 unbounded naturals, so the kernel's `u64` headroom check has no counterpart.
+
+Two representation choices matter when comparing with the kernel. A package trigger's inputs
+are a set: the model represents them as a duplicate-free list and rejects duplicates, which a
+kernel proposal cannot contain. And the kernel validates a delivered payload once per
+contract and digest within one activation, so it agrees with the model when `H` has no
+collisions among one proposal's payloads, as SHA-256 is assumed to.
 -/
 
 namespace Ontography
