@@ -30,8 +30,6 @@ pub struct ContextPolicy {
     pub max_bytes: usize,
     /// Maximum receipt rows, including delivery transitions and denials.
     pub max_events: usize,
-    /// Optional filesystem exposure selected from the delivered collection view.
-    pub workspace: Option<WorkspacePolicy>,
 }
 impl Default for ContextPolicy {
     fn default() -> Self {
@@ -44,7 +42,6 @@ impl Default for ContextPolicy {
             max_members: 100_000,
             max_bytes: 8 * 1024 * 1024,
             max_events: 4096,
-            workspace: None,
         }
     }
 }
@@ -70,21 +67,6 @@ pub enum InitialContext {
     /// Prepare all granted causal ancestor payloads in dependency order.
     Ancestry,
 }
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-/// A delivered collection view to expose through a private checkout.
-pub struct WorkspacePolicy {
-    #[serde(default)]
-    /// Optional incoming edge selecting exactly one received collection; roots have no edge.
-    pub input_edge: Option<String>,
-    #[serde(default)]
-    /// Allow private checkout changes to be published as a captured changes package.
-    pub writable: bool,
-    #[serde(default)]
-    /// Explicit delivery edge required when publishing a writable workspace.
-    pub output_edge: Option<String>,
-}
-
 #[derive(Clone, Debug)]
 /// The exact root request or received packages to which publication is bound.
 pub enum InvocationTrigger {

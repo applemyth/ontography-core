@@ -7,8 +7,8 @@
 //! full session open checks both, the read-only inspection functions check
 //! the context version alone. A run is compatible exactly when every checked
 //! version equals the compiled one; there is no migration, and a mismatch is a
-//! typed open error. A change to one store's tables bumps that store's version
-//! only.
+//! typed open error. A change to one store's tables or serialized records bumps
+//! that store's version only.
 //!
 //! The graph store never names a context table. It reaches the context store
 //! only through the hooks in this module: [`create_schema`],
@@ -27,8 +27,8 @@ use crate::context::{InvocationData, storage};
 use ontography_calculus::Reject;
 
 /// Version of the context store: `context_meta`, `context_invocations`, and
-/// `context_events`.
-pub(crate) const CONTEXT_SCHEMA_VERSION: i64 = 1;
+/// `context_events`, including their serialized invocation records.
+pub(crate) const CONTEXT_SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA: &str = "
 CREATE TABLE context_meta (

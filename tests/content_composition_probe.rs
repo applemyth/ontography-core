@@ -1,22 +1,15 @@
 //! Exercise content-package reuse through an actual workflow output.
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use ontography::{
     ActivationProposal, Authority, AuthorityTag, Contract, DefinitionId, Edge, EdgeDefinition,
     Emission, Graph, Kernel, Node, NodeDefinition, OutputAuthority, PackageDocument,
     PackageEnvelope, PackageId, PackageStore, ProposalDecision, ProposalRuntime, RootRule, Schema,
-    workspace::WorkspaceStore,
 };
 
 #[tokio::test]
-async fn changed_workspace_reuses_prior_content_and_emits_only_its_envelope() {
-    let directory = tempfile::tempdir().unwrap();
-    let source = directory.path().join("source");
-    std::fs::create_dir(&source).unwrap();
-    std::fs::write(source.join("unchanged.bin"), vec![b'x'; 64 * 1024]).unwrap();
-    std::fs::write(source.join("changed.txt"), b"before").unwrap();
-
+async fn changes_package_reuses_prior_content_and_emits_only_its_envelope() {
     let route = AuthorityTag::new("route").unwrap();
     let kernel = Kernel::admit(
         DefinitionId::new("content-composition-probe").unwrap(),
@@ -52,19 +45,45 @@ async fn changed_workspace_reuses_prior_content_and_emits_only_its_envelope() {
     .unwrap();
     let session = ProposalRuntime::new(Arc::new(kernel)).open().unwrap();
     let content = session.content_store().await.unwrap();
-    let workspace = WorkspaceStore::new(content.clone(), directory.path().join("cache"));
-    let packages = PackageStore::new(content);
-
-    let base = workspace.import_directory(&source).await.unwrap();
-    std::fs::write(source.join("changed.txt"), b"after").unwrap();
-    let changed = workspace.capture(&source, base.root()).await.unwrap();
+    let packages = PackageStore::new(content.clone());
+    let mut files = Vec::new();
+    for bytes in [vec![b'x'; 64 * 1024], b"before".to_vec(), b"after".to_vec()] {
+        let content = content.import_bytes(bytes).await.unwrap();
+        files.push(
+            packages
+                .put(&PackageDocument::File {
+                    content,
+                    executable: false,
+                })
+                .await
+                .unwrap(),
+        );
+    }
+    let base = packages
+        .put(&PackageDocument::Collection {
+            entries: BTreeMap::from([
+                ("unchanged.bin".into(), files[0]),
+                ("changed.txt".into(), files[1]),
+            ]),
+        })
+        .await
+        .unwrap();
+    let changed = packages
+        .put(&PackageDocument::Changes {
+            base,
+            changes: BTreeMap::from([("changed.txt".into(), Some(files[2]))]),
+        })
+        .await
+        .unwrap();
+    let base = packages.resolve(base).await.unwrap();
+    let changed = packages.resolve(changed).await.unwrap();
 
     let PackageDocument::Changes {
         base: referenced_base,
         changes,
     } = packages.get(changed.root()).await.unwrap()
     else {
-        panic!("capture should create a Changes package");
+        panic!("expected a Changes package");
     };
     assert_eq!(referenced_base, base.root());
     assert_eq!(changes.len(), 1);

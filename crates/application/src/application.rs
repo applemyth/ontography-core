@@ -16,10 +16,6 @@ use std::time::Duration;
 use bytes::Bytes;
 use thiserror::Error;
 
-#[path = "application_workspace.rs"]
-mod workspace_support;
-pub use workspace_support::PreparedWorkspace;
-
 use ontography_calculus::{
     Authority, AuthorityMatch, AuthorityTag, AuthorityTransitionRule, ContentDigest, Contract,
     DefinitionError, DefinitionId, Edge, EdgeDefinition, Graph, IngressMode, Kernel, Node,
@@ -32,7 +28,6 @@ use ontography_runtime::{
     ProposalDecision, ProposalRuntime, SessionError, SessionHandle, SessionOpenError,
     SessionSnapshot, SessionStatus, SubmitError,
 };
-use ontography_workspace::WorkspaceStore;
 
 type Text = Arc<str>;
 
@@ -457,7 +452,6 @@ pub struct ApplicationContext {
     execution: ExecutionContext,
     run_mode: ApplicationRunMode,
     node_state_dir: Option<PathBuf>,
-    workspace: WorkspaceStore,
     initial_input: Option<Payload>,
     root_authority: Option<Authority>,
     context_policy: ontography_runtime::ContextPolicy,
@@ -470,7 +464,6 @@ impl fmt::Debug for ApplicationContext {
             .field("execution", &self.execution)
             .field("run_mode", &self.run_mode)
             .field("node_state_dir", &self.node_state_dir)
-            .field("workspace", &self.workspace)
             .field("has_initial_input", &self.initial_input.is_some())
             .field("root_authority", &self.root_authority)
             .field("context_policy", &self.context_policy)
@@ -540,14 +533,6 @@ impl ApplicationContext {
     #[must_use]
     pub fn node_state_dir(&self) -> Option<&Path> {
         self.node_state_dir.as_deref()
-    }
-
-    /// Shared immutable workspace baselines for this application run.
-    ///
-    /// All node invocations reuse this cache. Writable checkouts remain private.
-    #[must_use]
-    pub fn workspace_cache_dir(&self) -> &Path {
-        self.workspace.cache_dir()
     }
 
     /// Returns the initial application input for the entry component.
@@ -1114,7 +1099,6 @@ struct BoundExecutable {
     executable: Arc<dyn ComponentExecutable>,
     run_mode: ApplicationRunMode,
     node_state_dir: Option<PathBuf>,
-    workspace: WorkspaceStore,
     initial_input: Option<Payload>,
     root_authority: Option<Authority>,
     context_policy: ontography_runtime::ContextPolicy,
@@ -1126,7 +1110,6 @@ impl ExecutableDefinition for BoundExecutable {
             execution,
             run_mode: self.run_mode,
             node_state_dir: self.node_state_dir.clone(),
-            workspace: self.workspace.clone(),
             initial_input: self.initial_input.clone(),
             root_authority: self.root_authority.clone(),
             context_policy: self.context_policy.clone(),
@@ -1348,13 +1331,12 @@ impl Application {
             )
             .await;
         match launched {
-            Ok((executions, workspace)) => Ok(RunningApplication {
+            Ok(executions) => Ok(RunningApplication {
                 runtime,
                 session,
                 host,
                 executions,
                 run_path,
-                workspace,
             }),
             Err(error) => {
                 host.shutdown().await;
@@ -1375,14 +1357,13 @@ impl Application {
         run_mode: ApplicationRunMode,
         initial_input: Option<Payload>,
         run_path: Option<&Path>,
-    ) -> Result<(Vec<ExecutionHandle>, WorkspaceStore), ApplicationStartError> {
+    ) -> Result<Vec<ExecutionHandle>, ApplicationStartError> {
         let current = session.kernel().await?;
         let bindings = self.launchable(current.graph(), run_mode)?;
         let node_state_root = prepare_node_state(
             run_path,
             bindings.iter().map(|binding| binding.node_id.as_ref()),
         )?;
-        let workspace = WorkspaceStore::for_run(session.content_store().await?, run_path);
         let fresh = run_mode == ApplicationRunMode::Fresh;
         let mut executions = Vec::with_capacity(bindings.len());
         for binding in bindings {
@@ -1393,7 +1374,6 @@ impl Application {
                 node_state_dir: node_state_root
                     .as_ref()
                     .map(|root| root.join(node_state_directory_name(&binding.node_id))),
-                workspace: workspace.clone(),
                 initial_input: initial_input.clone().filter(|_| is_entry),
                 root_authority: (is_entry && fresh).then(|| self.root.ceiling().clone()),
                 context_policy: binding.context_policy.clone(),
@@ -1407,7 +1387,7 @@ impl Application {
                 })?;
             executions.push(execution);
         }
-        Ok((executions, workspace))
+        Ok(executions)
     }
 
     /// Selects the bindings launched against `graph`, non-entry components
@@ -1512,7 +1492,6 @@ pub struct RunningApplication {
     host: ExecutionHost,
     executions: Vec<ExecutionHandle>,
     run_path: Option<PathBuf>,
-    workspace: WorkspaceStore,
 }
 
 impl fmt::Debug for RunningApplication {
@@ -1524,7 +1503,6 @@ impl fmt::Debug for RunningApplication {
             .field("host", &self.host)
             .field("executions", &self.executions)
             .field("run_path", &self.run_path)
-            .field("workspace", &self.workspace)
             .finish()
     }
 }

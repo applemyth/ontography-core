@@ -22,7 +22,7 @@ pub use activity::{ActivityReporter, ActivitySnapshot, InvocationActivity, Invoc
 pub use context::{
     ContextContribution, ContextError, ContextEvent, ContextMode, ContextPolicy, ContextResponse,
     InitialContext, InvocationHandle, InvocationId, InvocationRecord, InvocationStatus,
-    InvocationTrigger, PackageGrant, PackageMemberGrant, ReceiptState, WorkspacePolicy,
+    InvocationTrigger, PackageGrant, PackageMemberGrant, ReceiptState,
 };
 pub use hosting::{
     ExecutableDefinition, ExecutionContext, ExecutionFailure, ExecutionFuture, ExecutionHandle,

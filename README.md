@@ -31,7 +31,7 @@ proposes its outcomes; the **kernel** checks and applies admissible changes.
 The workflow's state records accepted history and outstanding work. Its
 **frontier** is the set of live packages awaiting delivery or consumption. The
 surrounding runtime and application layers provide execution hosting, durable
-sessions, invocation context, stored content, and filesystem workspaces.
+sessions, invocation context, and stored content packages.
 
 The chapters below expand on these pieces, what each can do, and how they
 interact.
@@ -44,7 +44,7 @@ interact.
 6. [Kernel, State, and Frontier](#kernel-state-and-frontier)
 7. [Rewriting and Extension](#rewriting-and-extension)
 8. [Runtime](#runtime)
-9. [Content and Workspaces](#content-and-workspaces)
+9. [Content Packages](#content-packages)
 10. [Application Composition](#application-composition)
 
 The [mathematical definition](MATHEMATICAL_DEFINITION.md) specifies the calculus
@@ -105,7 +105,7 @@ Within the workflow, a node can:
 13. **Serve multiple semantic roles.** Carry several node types, satisfying
     different edges' endpoint requirements.
 
-Through its executable, context, and workspace interfaces, it can:
+Through its executable and context interfaces, it can:
 
 14. **Run independently of activations.** Start before packages arrive, remain
     alive, submit many proposals, or exit without producing any activation.
@@ -138,39 +138,36 @@ Through its executable, context, and workspace interfaces, it can:
 25. **Work with composed artifacts.** Reuse existing content through collections
     and changes packages, representing additions, replacements, and deletions
     while retaining earlier versions.
-26. **Use private filesystem workspaces.** Materialize a collection, expose a
-    read-only or writable checkout according to policy, capture changes, and
-    prepare an output with its content dependencies.
-27. **Keep local persistent state.** Use its node directory across application
+26. **Keep local persistent state.** Use its node directory across application
     restarts. Application resume relaunches the executable with that directory.
-28. **Observe and report execution lifecycle.** Wait for workflow changes,
+27. **Observe and report execution lifecycle.** Wait for workflow changes,
     report current activity, respond to stop requests, exit, or report failure.
 
 As a reusable component, it can:
 
-29. **Be placed at multiple nodes.** Reuse implementation behavior with different
+28. **Be placed at multiple nodes.** Reuse implementation behavior with different
     identities, configuration, and connections.
-30. **Expose named input and output ports.** Declare contracts and supported
+29. **Expose named input and output ports.** Declare contracts and supported
     ingress modes, allow additional port names, and bind a port to multiple
     concrete edges.
-31. **Describe and validate its configuration.** Provide discoverable component
+30. **Describe and validate its configuration.** Provide discoverable component
     metadata and validate configuration and graph placement before execution.
 
 With session, execution-host, or application-run access supplied by the
 application, its code can additionally:
 
-32. **Transfer waiting outbound packages** through currently accepting edges.
-33. **Retire live packages**, optionally citing an accepted activation as evidence.
-34. **Rewrite the graph.** Apply permitted productions to create, remove, or
+31. **Transfer waiting outbound packages** through currently accepting edges.
+32. **Retire live packages**, optionally citing an accepted activation as evidence.
+33. **Rewrite the graph.** Apply permitted productions to create, remove, or
     replace nodes and edges, inspecting the proposed replacement and package
     retirements before committing.
-35. **Introduce new root and authority policies** on new nodes through permitted
+34. **Introduce new root and authority policies** on new nodes through permitted
     rewrite productions.
-36. **Extend the workflow vocabulary** with additional types, authority tags,
+35. **Extend the workflow vocabulary** with additional types, authority tags,
     and contracts while preserving existing definitions.
-37. **Launch and supervise executables**, including implementations at newly
+36. **Launch and supervise executables**, including implementations at newly
     created nodes; observe, stop, or abort those executions.
-38. **Manage workflow runs.** Create independent sessions, inspect snapshots,
+37. **Manage workflow runs.** Create independent sessions, inspect snapshots,
     suspend/resume applications, and use the core's checkpoint or supported
     replay facilities.
 
@@ -275,7 +272,7 @@ evidence, or follow from a graph rewrite. Neither retirement nor consumption
 erases the producer or delivery record.
 
 The [frontier](#kernel-state-and-frontier) contains all live packages. The
-separate [content and workspaces](#content-and-workspaces) chapter explains
+separate [content packages](#content-packages) chapter explains
 immutable artifact packages that workflow payloads can reference: a workflow
 occurrence tracks work, while a content package describes stored data.
 
@@ -585,8 +582,8 @@ Receipts distinguish preparation, a host-observed transport send, and a worker
 acknowledgement; acknowledgement does not prove the worker used that information.
 Rejected, interrupted, and failed attempts retain their evidence. Grants control
 this context interface; operating-system, filesystem, and network isolation must
-come from the host adapter. [Content and Workspaces](#content-and-workspaces)
-explains artifact grants and filesystem exposure.
+come from the host adapter. [Content Packages](#content-packages) explains
+artifact grants and retention.
 
 ### Persistence and recovery
 
@@ -597,6 +594,12 @@ A kernel rejection leaves accepted state unchanged. A failure before any write
 can leave the session usable; failure after writing begins faults it because
 commit acknowledgement is uncertain. Reopening resolves durable state and
 performs the required integrity checks before admission can resume.
+
+The graph store uses schema version 11 and the invocation context store uses
+version 2. Each version is checked independently; incompatible stores are
+rejected without migration. Context version 2 removes the former workspace
+policy from stored invocation records, so runs using context version 1 cannot
+be reopened by this version.
 
 Ordinary reopening loads the stored current graph and indexed state, including runs
 changed by rewrites and other dynamic transitions. It trusts the store owned by
@@ -617,7 +620,7 @@ See [session operations](crates/runtime/src/session.rs),
 [invocation context](crates/runtime/src/context.rs), and the
 [recovery tests](tests/persistent_recovery.rs).
 
-## Content and Workspaces
+## Content Packages
 
 A workflow [package](#packages) is one occurrence of work with a producer and
 lifecycle. A **content package** is an immutable artifact, identified by its
@@ -651,35 +654,18 @@ ordinary arbitrary bytes do not implicitly declare referenced artifacts.
 **Retention and access are separate.** A changes package must retain its base and
 hidden historical dependencies to preserve its representation. An invocation's
 grants expose its resolved visible view; retained old files are not automatically
-readable or eligible for republication by a worker. Staged imports keep a
-capture's tentative content alive until policy checks succeed, and release their
-own retention on failure without discarding another operation's content.
+readable or eligible for republication by a worker. Staged imports keep
+tentative content alive until the caller accepts it, and release their own
+retention on failure without discarding another operation's content.
 
-A `WorkspaceStore` imports directories, resolves directory views, creates private
-checkouts, and captures edits as new changes packages. Checkout files are cloned
-from a shared verified baseline cache and checked again before exposure. This
-layer requires Unix and filesystem support for copy-on-write cloning; it fails
-when cloning is unavailable. Self-contained Git repositories can travel inside
-packages: permitted repository objects and references are retained, and checkout
-rebuilds its local staging index.
-
-In an application, a workspace policy selects a collection from the invocation's
-inputs, optionally by incoming edge, and sets publication permissions. A root
-invocation can also supply its collection through root input. Writable exposure
-requires a chosen output edge. After tools finish, the host stops writers and
-calls `finish`: it captures additions, replacements, and deletions and prepares
-an optional emission with its dependency closure. The caller still submits the
-activation. An unchanged capture reuses the base identity.
-
-Read-only filesystem permissions are advisory. `PreparedWorkspace::finish`
-rejects changes to a read-only view before preparing an output. Filesystem
-isolation depends on the adapter. Capture detects observable races but is not
-an atomic operating-system snapshot. Private checkouts are removed when their
-use ends; immutable artifacts remain according to retention.
+Applications own filesystem workspaces: importing directories, creating and
+cleaning up checkouts, capturing edits, and deciding when and where to publish
+them. Adapters use core's content and package APIs to construct artifacts,
+ordinary invocation receipts to record their operations, and submission APIs
+to publish the resulting packages with their dependency closures.
 
 See [content composition](crates/content/src/package.rs),
-[workspace operations](crates/workspace/src/lib.rs),
-[application workspace integration](crates/application/src/application_workspace.rs),
+[staged retention tests](tests/content_retention.rs),
 and the [composition example](tests/content_composition_probe.rs).
 
 ## Application Composition
@@ -738,7 +724,7 @@ entry receives the initial input and compiled root authority. Its executable
 decides when to propose the root activation.
 
 Each execution receives an `ApplicationContext` with runtime observations,
-content access, invocation and workspace facilities, and lifecycle signals.
+content access, invocation facilities, and lifecycle signals.
 Persistent runs also provide a per-node state directory, reused on resume.
 A `RunningApplication` exposes executions, the session, snapshots, waiting,
 suspension, and shutdown. Waiting for idle means no hosted execution remains; live
@@ -767,7 +753,7 @@ ontography = { package = "ontography-core", path = "../ontography-core" }
 ```
 
 For narrower dependencies, use `ontography-calculus`, `ontography-content`,
-`ontography-runtime`, `ontography-workspace`, or `ontography-application` directly.
+`ontography-runtime`, or `ontography-application` directly.
 The [integration tests](tests) provide executable examples. Run the workspace
 suite from this repository with:
 

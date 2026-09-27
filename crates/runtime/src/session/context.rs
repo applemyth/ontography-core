@@ -21,9 +21,7 @@ use crate::context::{
     InvocationTrigger, PackageGrant, PackageMemberGrant, ReceiptState,
 };
 use ontography_calculus::{Emission, OutputAuthority, PackageId};
-use ontography_content::package::{
-    PackageEnvelope, PackageStore, ResolvedEntryKind, ResolvedPackage,
-};
+use ontography_content::package::{PackageEnvelope, PackageStore, ResolvedEntryKind};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
@@ -313,15 +311,6 @@ impl SessionHandle {
                 "ancestry preparation requires ancestor payload grants".into(),
             ));
         }
-        if policy
-            .workspace
-            .as_ref()
-            .is_some_and(|w| w.writable && w.output_edge.is_none())
-        {
-            return Err(ContextError::Denied(
-                "writable workspace requires output_edge".into(),
-            ));
-        }
         let content_store = inner.objects.content_store();
         let package_store = PackageStore::new(content_store.clone());
         let mut packages = Vec::new();
@@ -546,9 +535,6 @@ impl SessionHandle {
             packages,
             members,
         };
-        if data.policy.workspace.is_some() {
-            workspace_root(&inner.facts, &data)?;
-        }
         // The root input, the dependency retention, and the invocation row are
         // written together under the lock with no await between them; a
         // failure once they begin faults the session.
@@ -695,58 +681,6 @@ async fn register_composition(
     }
     Ok(())
 }
-fn workspace_root<'a>(
-    facts: &super::super::sqlite::SqliteSession,
-    data: &'a InvocationData,
-) -> Result<&'a PackageMemberGrant, ContextError> {
-    let policy = data
-        .policy
-        .workspace
-        .as_ref()
-        .ok_or_else(|| ContextError::Denied("workspace is not configured".into()))?;
-    let mut selected = None;
-    for root in data
-        .members
-        .iter()
-        .filter(|m| m.path.is_empty() && matches!(m.kind, ResolvedEntryKind::Directory))
-    {
-        let package = data
-            .packages
-            .iter()
-            .find(|p| p.handle == root.handle && p.received);
-        if package.is_none()
-            && !matches!(&data.trigger, BoundTrigger::Root { handle, .. } if handle == &root.handle)
-        {
-            continue;
-        }
-        if let Some(edge) = &policy.input_edge {
-            let Some(package) = package else {
-                continue;
-            };
-            let history = facts
-                .package_history(package.package_id)
-                .map_err(storage)?
-                .ok_or(ContextError::NotFound)?;
-            if history
-                .package()
-                .delivery()
-                .map(ontography_calculus::Delivery::edge_id)
-                != Some(edge.as_str())
-            {
-                continue;
-            }
-        }
-        if selected.replace(root).is_some() {
-            return Err(ContextError::Denied(
-                "workspace selection needs exactly one delivered collection".into(),
-            ));
-        }
-    }
-    selected.ok_or_else(|| {
-        ContextError::Denied("workspace selection has no delivered collection".into())
-    })
-}
-
 fn immediate_child(parent: &str, path: &str) -> bool {
     if path.is_empty() {
         return false;
@@ -947,50 +881,6 @@ impl InvocationHandle {
             .into_iter()
             .map(|(contribution, _)| contribution)
             .collect())
-    }
-    /// Selects the configured delivered collection and resolves its trusted workspace view.
-    ///
-    /// # Errors
-    /// Returns an error for expired custody, an ambiguous or missing
-    /// collection, or unavailable dependencies.
-    pub async fn workspace_package(&self) -> Result<(String, ResolvedPackage), ContextError> {
-        let session = self.inner.session.upgrade()?;
-        let inner = session.core.inner.lock().await;
-        active(&inner, self)?;
-        let root = workspace_root(&inner.facts, &self.inner.data)?;
-        let store = PackageStore::new(inner.objects.content_store());
-        drop(inner);
-        let view = store.resolve(root.package).await.map_err(storage)?;
-        active(&*session.core.inner.lock().await, self)?;
-        Ok((root.handle.clone(), view))
-    }
-    /// Records exposure of the configured, granted collection view.
-    ///
-    /// # Errors
-    /// Returns an error for ungranted package roots, expired custody,
-    /// exhausted budgets, or persistence failure.
-    pub async fn record_workspace_exposure(
-        &self,
-        content: ContentId,
-    ) -> Result<ContextResponse, ContextError> {
-        let session = self.inner.session.upgrade()?;
-        let mut inner = session.core.inner.lock().await;
-        active(&inner, self)?;
-        let root = workspace_root(&inner.facts, &self.inner.data)?;
-        if root.package != content {
-            return Err(ContextError::Denied(
-                "workspace package is not selected".into(),
-            ));
-        }
-        let value = json!({"package":content,"handle":root.handle,"writable":self.inner.data.policy.workspace.as_ref().is_some_and(|w|w.writable),"boundary":"host_checkout_prepared","filesystem_reads_traced":false});
-        retain_event(
-            &session.core,
-            &mut inner,
-            self,
-            "workspace_exposure",
-            json_payload(&value)?,
-            value,
-        )
     }
     /// Checks a worker-produced delivery and returns its required retention closure.
     ///

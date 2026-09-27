@@ -1,4 +1,4 @@
-//! Portable package names retain their bytes; filesystem views reject aliases.
+//! Package identities and member names preserve their exact representation.
 use ontography::{PackageDocument, PackageStore, ProposalRuntime};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -6,7 +6,7 @@ use std::sync::Arc;
 mod support;
 
 #[tokio::test]
-async fn workspace_rejects_unicode_aliases_without_changing_package_identity() {
+async fn package_identity_and_names_preserve_exact_bytes() {
     let runtime = ProposalRuntime::new(Arc::new(support::kernel(&["A"], &[])));
     let session = runtime.open().unwrap();
     let content = session.content_store().await.unwrap();
@@ -28,26 +28,17 @@ async fn workspace_rejects_unicode_aliases_without_changing_package_identity() {
             .unwrap(),
         canonical
     );
-    let directory = tempfile::tempdir().unwrap();
-    let workspace = ontography::workspace::WorkspaceStore::new(content, directory.path());
-    for (a, b) in [("é", "e\u{301}"), ("É", "e\u{301}")] {
+    for (a, b) in [("é", "e\u{301}"), ("É", "e\u{301}"), ("é", "ø")] {
         let id = packages
             .put(&PackageDocument::Collection {
                 entries: BTreeMap::from([(a.into(), canonical), (b.into(), canonical)]),
             })
             .await
             .unwrap();
-        assert!(matches!(
-            workspace.open(id).await,
-            Err(ontography::workspace::WorkspaceError::Invalid(message))
-                if message == "case- or Unicode-normalization-colliding paths"
-        ));
+        let view = packages.resolve(id).await.unwrap();
+        assert_eq!(view.entries().len(), 3);
+        for name in [a, b] {
+            assert!(view.entries().iter().any(|entry| entry.path == name));
+        }
     }
-    let distinct = packages
-        .put(&PackageDocument::Collection {
-            entries: BTreeMap::from([("é".into(), canonical), ("ø".into(), canonical)]),
-        })
-        .await
-        .unwrap();
-    workspace.open(distinct).await.unwrap();
 }

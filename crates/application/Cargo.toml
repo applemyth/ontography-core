@@ -12,7 +12,6 @@ repository.workspace = true
 ontography-calculus.workspace = true
 ontography-content.workspace = true
 ontography-runtime.workspace = true
-ontography-workspace.workspace = true
 bytes.workspace = true
 serde.workspace = true
 serde_json.workspace = true

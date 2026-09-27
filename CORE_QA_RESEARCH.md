@@ -5,6 +5,11 @@ snapshot at `87e9600`. It separates **observed behavior**, **source-derived
 limits**, and **unexecuted hypotheses**. It does not treat passing examples as a
 proof that every reachable state is correct.
 
+Filesystem workspace handling has since moved into the application. References
+to core's former workspace APIs and filesystem tests below are historical;
+current core tests exercise package composition and staged content retention
+directly.
+
 The tables below record the pre-fix audit baseline. The subsequent
 [audit changes](docs/AUDIT_FIXES.md) fix the release-only retirement failure,
 capture and SQL retention leaks, persistent fault recovery, and forged-view

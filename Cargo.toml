@@ -18,12 +18,10 @@ repository = "https://github.com/applemyth/ontography"
 ontography-calculus = { path = "crates/calculus" }
 ontography-content = { path = "crates/content" }
 ontography-runtime = { path = "crates/runtime" }
-ontography-workspace = { path = "crates/workspace" }
 ontography-application = { path = "crates/application" }
 bao-tree = { version = "0.16.1", features = ["validate"] }
 bytes = "1"
 futures-lite = "2.6"
-reflink-copy = "0.1.30"
 iroh-blobs = { version = "=0.103.0", path = "vendor/iroh-blobs", default-features = false, features = ["fs-store"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive", "rc"] }
@@ -33,7 +31,6 @@ tempfile = "3"
 thiserror = "2.0.19"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
 uuid = { version = "1", features = ["v4", "serde"] }
-unicode-normalization = "0.1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -76,7 +73,6 @@ ontography-application.workspace = true
 ontography-calculus.workspace = true
 ontography-content.workspace = true
 ontography-runtime.workspace = true
-ontography-workspace.workspace = true
 
 [dev-dependencies]
 rusqlite.workspace = true

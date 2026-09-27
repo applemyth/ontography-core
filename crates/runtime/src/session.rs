@@ -2201,21 +2201,31 @@ mod tests {
         let runtime = ProposalRuntime::new(Arc::clone(&kernel));
         drop(runtime.create_persistent(&run).expect("persistent session"));
         drop(runtime);
-        with_detached_connection(&run, "UPDATE context_meta SET schema_version = 99;");
-
         let runtime = ProposalRuntime::new(Arc::clone(&kernel));
-        assert!(matches!(
-            runtime.open_persistent(&run),
-            Err(SessionOpenError::Storage(message))
-                if message.contains("unsupported context schema version 99")
-        ));
-        assert!(matches!(
-            crate::context::read_invocations(&run, None, None, 10),
-            Err(crate::context::ContextError::Storage(message))
-                if message.contains("unsupported context schema version 99")
-        ));
+        for version in [1, 99] {
+            with_detached_connection(
+                &run,
+                &format!("UPDATE context_meta SET schema_version = {version};"),
+            );
+            let expected = format!("unsupported context schema version {version}");
+            assert!(matches!(
+                runtime.open_persistent(&run),
+                Err(SessionOpenError::Storage(message)) if message.contains(&expected)
+            ));
+            assert!(matches!(
+                crate::context::read_invocations(&run, None, None, 10),
+                Err(crate::context::ContextError::Storage(message))
+                    if message.contains(&expected)
+            ));
+        }
 
-        with_detached_connection(&run, "UPDATE context_meta SET schema_version = 1;");
+        with_detached_connection(
+            &run,
+            &format!(
+                "UPDATE context_meta SET schema_version = {};",
+                crate::sqlite::context::CONTEXT_SCHEMA_VERSION
+            ),
+        );
         assert!(
             crate::context::read_invocations(&run, None, None, 10)
                 .expect("inspection at the compiled context version")

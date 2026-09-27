@@ -6,7 +6,7 @@
 //! Runtime sessions persist and serialize these actions together.
 //!
 //! This crate is the facade over the workspace crates: `ontography-calculus`,
-//! `ontography-content`, `ontography-runtime`, `ontography-workspace`, and
+//! `ontography-content`, `ontography-runtime`, and
 //! `ontography-application`. It re-exports one flat set of names from them,
 //! plus the calculus crate's [`storage`] module, which names the adapter
 //! contract a persistent store implements.
@@ -20,7 +20,6 @@ pub use ontography_calculus::storage;
 pub use ontography_content::content;
 pub use ontography_content::package;
 pub use ontography_runtime::context;
-pub use ontography_workspace as workspace;
 
 /// Canonical proposal sessions and opaque execution hosting.
 pub mod runtime {
@@ -43,7 +42,7 @@ pub use content::{ContentError, ContentId, ContentMetadata, ContentReader, Conte
 pub use context::{
     ContextContribution, ContextError, ContextEvent, ContextMode, ContextPolicy, ContextResponse,
     InitialContext, InvocationHandle, InvocationId, InvocationRecord, InvocationStatus,
-    InvocationTrigger, PackageGrant, PackageMemberGrant, ReceiptState, WorkspacePolicy,
+    InvocationTrigger, PackageGrant, PackageMemberGrant, ReceiptState,
 };
 pub use ontography_application::{ApplicationConfig, ApplicationConfigError, ApplicationRegistry};
 pub use ontography_calculus::{
