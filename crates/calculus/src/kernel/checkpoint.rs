@@ -2,12 +2,16 @@
 //!
 //! A checkpoint is the adapter's view of a whole state. Restoring it checks
 //! the definition binding, the invariants I1 through I7 of the state model,
-//! causal acyclicity, and two consequences of rewrite cleanup. I3 is checked
-//! only as far as a state records it: a delivery on a current edge must match
-//! that edge's incidence, while a delivery on a removed edge needs only a used
-//! edge identity and receiver, because the state keeps no historical
-//! incidence. Restoring does not rerun contracts or cleanup, so it establishes
-//! integrity of a trusted store, not historical reachability.
+//! causal acyclicity, and two consequences of rewrite cleanup. The state keeps
+//! no historical incidence, so I3 and I7 are checked as far as it records
+//! them: a delivery on a current edge must match that edge's incidence, a
+//! delivery on a removed edge must name a used edge identity and receiver,
+//! deliveries over one edge identity must agree on its endpoints, and edge
+//! identities need some node identity for those endpoints. These checks are
+//! exactly the invariants: the Lean model's `checkpoint_sound` proves that
+//! some well-formed state records every checkpoint they accept. Restoring does
+//! not rerun contracts or cleanup, so it establishes integrity of a trusted
+//! store, not historical reachability.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -117,10 +121,12 @@ impl Kernel {
     /// Checks a trusted checkpoint's invariants and rebuilds the state.
     ///
     /// This verifies the definition binding, ownership, custody, consumption,
-    /// retirement consistency, identity allocation, exact revision accounting, causal
-    /// acyclicity, join-authority equality, schema membership of every root
-    /// authority, object type, and carried authority, and current-edge
-    /// incidence of every delivery. It does not rerun contracts or cleanup.
+    /// retirement consistency, identity allocation, exact revision accounting,
+    /// causal acyclicity, join-authority equality, schema membership of every
+    /// root authority, object type, and carried authority, current-edge
+    /// incidence of every delivery, and one incidence per edge identity across
+    /// deliveries. Allocated edge identities require an allocated node
+    /// identity. It does not rerun contracts or cleanup.
     ///
     /// # Errors
     ///
@@ -163,6 +169,13 @@ impl Kernel {
                 "current graph identities are missing or malformed in lifetime allocations",
             ));
         }
+        // Every admitted edge had admitted endpoints. The lifetime sets keep no
+        // incidence, so this is all they can record of it.
+        if used_node_ids.is_empty() && !used_edge_ids.is_empty() {
+            return Err(CheckpointError::Identity(
+                "edge identities are allocated without any node identity",
+            ));
+        }
         if activations
             .values()
             .map(|activation| activation.outputs.len())
@@ -178,6 +191,7 @@ impl Kernel {
         let mut explicit_retirements = 0_u64;
         let mut structural_revisions = BTreeSet::new();
         let mut explicit_revisions = BTreeSet::new();
+        let mut incidences = BTreeMap::new();
         consumption_order(&activations).map_err(CheckpointError::Cycle)?;
         for (&id, activation) in &activations {
             let node = match &activation.trigger {
@@ -266,6 +280,15 @@ impl Kernel {
                         {
                             return Err(CheckpointError::Delivery(
                                 "delivery is inconsistent with package custody",
+                            ));
+                        }
+                        // An edge identity keeps one incidence for its lifetime,
+                        // so every delivery over it agrees on its endpoints, even
+                        // once the edge is removed.
+                        let incidence = (&record.producer_node, &delivery.receiver);
+                        if *incidences.entry(&delivery.edge_id).or_insert(incidence) != incidence {
+                            return Err(CheckpointError::Delivery(
+                                "deliveries over one edge disagree on its endpoints",
                             ));
                         }
                         if output.edge_id.is_none() {
@@ -1182,6 +1205,124 @@ mod tests {
                 "live receipt at an All receiver names a route that is no longer incoming"
             )
         );
+    }
+
+    #[test]
+    fn checkpoint_rejects_receipts_that_disagree_on_a_removed_edge() {
+        let (initial, _) = fixture();
+        let mut state = initial.empty_state();
+        let first = emit(&initial, &mut state, true);
+        let second = emit(&initial, &mut state, true);
+        let right = RewriteFragment::new(
+            initial.graph().nodes().to_vec(),
+            vec![],
+            initial.node_definitions().to_vec(),
+            vec![],
+            vec![],
+            initial.roots().to_vec(),
+        );
+        let names: BTreeSet<Arc<str>> = [Arc::from("A"), Arc::from("B")].into();
+        let grammar = RewriteGrammar::new([RewriteProduction::new(
+            "disconnect",
+            RewriteFragment::from_kernel(&initial),
+            names.clone(),
+            BTreeSet::new(),
+            right,
+        )
+        .unwrap()])
+        .unwrap();
+        let request = RewriteRequest::new(
+            "disconnect",
+            RewriteMatch::new(
+                names.into_iter().map(|node| (node.clone(), node)).collect(),
+                BTreeMap::from([(Arc::from("ab"), Arc::from("ab"))]),
+                BTreeMap::new(),
+                BTreeMap::new(),
+            ),
+        );
+        let prepared = initial
+            .prepare_rewrite(&state, &grammar, &request, &BTreeMap::new())
+            .unwrap();
+        let current = initial.commit_rewrite(&mut state, prepared).unwrap();
+        // Both receipts crossed `ab` from `A` to `B` and stay live at `B`, but
+        // the current graph no longer records the incidence of `ab`.
+        assert!(current.graph().edge("ab").is_none());
+        for receipt in [first, second] {
+            let record = state.package(receipt).unwrap();
+            assert!(record.is_live());
+            assert_eq!(record.holder(), "B");
+        }
+        assert_eq!(
+            current.restore_checkpoint(state.checkpoint()).unwrap(),
+            state
+        );
+
+        let rejects = |mutate: &dyn Fn(&mut Checkpoint)| {
+            let mut invalid = state.checkpoint();
+            mutate(&mut invalid);
+            current.restore_checkpoint(invalid).unwrap_err()
+        };
+        let disagree =
+            CheckpointError::Delivery("deliveries over one edge disagree on its endpoints");
+        // Each claim passes every other check: `A` and `B` are current `Any`
+        // nodes and used identities, and `ab` is a used edge identity.
+        assert_eq!(
+            rejects(&|c| {
+                let record = c.packages.get_mut(&second).unwrap();
+                record.delivery.as_mut().unwrap().receiver = Arc::from("A");
+            }),
+            disagree
+        );
+        assert_eq!(
+            rejects(&|c| {
+                let root = c.activations.get_mut(&second.producer()).unwrap();
+                root.node_id = Arc::from("B");
+                let Trigger::Orig { node_id, .. } = &mut root.trigger else {
+                    panic!("root fixture");
+                };
+                *node_id = Arc::from("B");
+                c.packages.get_mut(&second).unwrap().producer_node = Arc::from("B");
+            }),
+            disagree
+        );
+    }
+
+    #[test]
+    fn checkpoint_rejects_edge_identities_without_node_identities() {
+        // With no current nodes, no current identity needs to be allocated.
+        let kernel = Kernel::admit(
+            DefinitionId::new("empty").unwrap(),
+            Schema::new([] as [&str; 0], [] as [&str; 0], []).unwrap(),
+            Graph::new([], []).unwrap(),
+            [],
+            [],
+            [],
+            [],
+            [],
+        )
+        .unwrap();
+        let state = kernel.empty_state();
+        assert_eq!(
+            kernel.restore_checkpoint(state.checkpoint()).unwrap(),
+            state
+        );
+
+        let rejects = |mutate: &dyn Fn(&mut Checkpoint)| {
+            let mut invalid = state.checkpoint();
+            mutate(&mut invalid);
+            kernel.restore_checkpoint(invalid).unwrap_err()
+        };
+        assert_eq!(
+            rejects(&|c| {
+                c.used_edge_ids.insert(Arc::from("ab"));
+            }),
+            CheckpointError::Identity("edge identities are allocated without any node identity")
+        );
+        // A node identity for its endpoints is all a removed edge needs.
+        let mut valid = state.checkpoint();
+        valid.used_node_ids.insert(Arc::from("A"));
+        valid.used_edge_ids.insert(Arc::from("ab"));
+        assert!(kernel.restore_checkpoint(valid).is_ok());
     }
 
     #[test]
