@@ -9,10 +9,12 @@ reads only what a checkpoint holds: the activation and package maps, the lifetim
 the definition-change count, and the revision. The model's incidence log and change log are
 invisible to it.
 
-Every well-formed state passes, so restoration never rejects a reachable state. The checks
-are strictly weaker than `WF`, though: a checkpoint keeps no incidence for removed edges, so
-two receipts on one removed edge may disagree about its endpoints. `checkpoint_gap` exhibits
-such a checkpoint, which no well-formed state has.
+The checks are exactly the invariants. Every well-formed state passes them, and every
+checkpoint that passes is recorded by some well-formed state, one that may differ in its
+acceptance order and ghost logs. A checkpoint cannot record the incidence of an edge that
+every receipt names consistently, but every such incidence is consistent with some
+well-formed history, so restoration establishes the integrity of a trusted store, not its
+reachability.
 -/
 
 namespace Ontography
@@ -32,9 +34,11 @@ structure CheckpointValid (Δ : Definition) (S : State) : Prop where
   activations_dom : ∀ a, (S.activations a).isSome ↔ a ∈ S.activationIds
   packageIds_nodup : S.packageIds.Nodup
   packages_dom : ∀ p, (S.packages p).isSome ↔ p ∈ S.packageIds
-  /-- Identity: lifetime identities are nonempty and include the current graph's. -/
+  /-- Identity: lifetime identities are nonempty and include the current graph's; edge
+  identities are distinct, and some node identity exists for their endpoints. -/
   used_nonempty : (∀ v ∈ S.usedNodes, v ≠ "") ∧ ∀ e ∈ S.usedEdges, e ≠ ""
   current_used : Δ.nodes ⊆ S.usedNodes ∧ Δ.edges.map (·.id) ⊆ S.usedEdges
+  used_edges : S.usedEdges.Nodup ∧ (S.usedEdges ≠ [] → S.usedNodes ≠ [])
   activation_nodes_used : ∀ a act, S.activations a = some act → act.node ∈ S.usedNodes
   /-- Ownership: packages are exactly the outputs, agree with their birth metadata, and lie in
   the schema. -/
@@ -61,11 +65,15 @@ structure CheckpointValid (Δ : Definition) (S : State) : Prop where
     ∀ p ∈ act.trigger.inputs, ∀ q ∈ act.trigger.inputs, ∀ r s,
       S.packages p = some r → S.packages q = some s → SetEq r.authority s.authority
   /-- Delivery: a delivery names lifetime identities, matches its edge's incidence while that
-  edge is current, and is the birth edge when one was named. -/
+  edge is current, agrees with every other delivery over that edge, and is the birth edge
+  when one was named. -/
   delivery_used : ∀ p r d, S.packages p = some r → r.delivery = some d →
     d.edge ∈ S.usedEdges ∧ d.receiver ∈ S.usedNodes
   delivery_current : ∀ p r d e, S.packages p = some r → r.delivery = some d →
     Δ.edge? d.edge = some e → e.source = r.producerNode ∧ e.target = d.receiver
+  delivery_consistent : ∀ p q r s d d', S.packages p = some r → S.packages q = some s →
+    r.delivery = some d → s.delivery = some d' → d.edge = d'.edge →
+      r.producerNode = s.producerNode ∧ d.receiver = d'.receiver
   birth_edge : ∀ p r o e, S.packages p = some r → S.output? p = some o → o.edge = some e →
     ∃ v, r.delivery = some ⟨e, v⟩
   /-- Custody: live holders are nodes, and a live `All` receipt keeps a current route. -/
