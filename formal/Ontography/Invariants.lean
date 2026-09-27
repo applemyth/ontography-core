@@ -76,6 +76,10 @@ structure WF (Δ : Definition) (S : State) : Prop where
   used_nodes : Δ.nodes ⊆ S.usedNodes
   edge_log : Δ.edges ⊆ S.edgeLog
   edge_log_ids : (S.edgeLog.map (·.id)).Nodup
+  /-- I7: every node an activation or a logged edge names is a lifetime identity, so a fresh
+  identity can never alias one. -/
+  activation_nodes_used : ∀ a act, S.activations a = some act → act.node ∈ S.usedNodes
+  edge_log_nodes : ∀ e ∈ S.edgeLog, e.source ∈ S.usedNodes ∧ e.target ∈ S.usedNodes
   /-- Causal acyclicity: every input was produced by an earlier activation. -/
   causal_order : ∀ p r b, S.packages p = some r → r.status = .consumed b →
     S.activationIds.idxOf p.producer < S.activationIds.idxOf b
