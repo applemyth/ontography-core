@@ -1,0 +1,6 @@
+name = "ontography"
+version = "0.1.0"
+defaultTargets = ["Ontography"]
+
+[[lean_lib]]
+name = "Ontography"
