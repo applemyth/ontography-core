@@ -30,7 +30,7 @@ use super::frontier::RetirementReason;
 use super::occurrence::{
     Activation, ActivationId, PackageId, PackageRecord, PackageStatus, State, Trigger, fresh_nonce,
 };
-use super::rewrite::RewriteFragment;
+use super::rewrite::GraphFragment;
 
 /// The whole of one state as an adapter stores it.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -545,8 +545,8 @@ pub enum FragmentDecodeError {
     Definition(#[from] DefinitionError),
 }
 
-impl From<&RewriteFragment> for FragmentData {
-    fn from(fragment: &RewriteFragment) -> Self {
+impl From<&GraphFragment> for FragmentData {
+    fn from(fragment: &GraphFragment) -> Self {
         Self {
             version: FRAGMENT_ENCODING_VERSION,
             nodes: fragment
@@ -617,7 +617,7 @@ impl From<&RewriteFragment> for FragmentData {
     }
 }
 
-impl TryFrom<FragmentData> for RewriteFragment {
+impl TryFrom<FragmentData> for GraphFragment {
     type Error = FragmentDecodeError;
 
     fn try_from(data: FragmentData) -> Result<Self, Self::Error> {
@@ -690,9 +690,24 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::{
-        ActivationProposal, Contract, Emission, Graph, OutputAuthority, Payload, Phase,
-        RetirementReason, RewriteGrammar, RewriteMatch, RewriteProduction, RewriteRequest, Schema,
+        ActivationProposal, Contract, Emission, Graph, GraphEdit, OutputAuthority, Payload,
+        PermitAll, Phase, PreparedRewrite, Principal, RetirementReason, RewriteRequest, Schema,
     };
+
+    fn prepare(kernel: &Kernel, state: &State, edit: GraphEdit) -> PreparedRewrite {
+        let request = RewriteRequest::new(Principal::new("test"), edit);
+        kernel
+            .prepare_rewrite(state, &PermitAll, &request, &BTreeMap::new())
+            .unwrap()
+    }
+
+    fn remove_edge_ab() -> GraphEdit {
+        GraphEdit::new(
+            BTreeSet::new(),
+            BTreeSet::from([Arc::from("ab")]),
+            GraphFragment::default(),
+        )
+    }
 
     fn fixture() -> (Kernel, Arc<AtomicUsize>) {
         let calls = Arc::new(AtomicUsize::new(0));
@@ -748,36 +763,7 @@ mod tests {
         let mut state = initial.empty_state();
         let retired = emit(&initial, &mut state, false);
         let received = emit(&initial, &mut state, true);
-        let right = RewriteFragment::new(
-            initial.graph().nodes().to_vec(),
-            vec![],
-            initial.node_definitions().to_vec(),
-            vec![],
-            vec![],
-            initial.roots().to_vec(),
-        );
-        let names: BTreeSet<Arc<str>> = [Arc::from("A"), Arc::from("B")].into();
-        let grammar = RewriteGrammar::new([RewriteProduction::new(
-            "disconnect",
-            RewriteFragment::from_kernel(&initial),
-            names.clone(),
-            BTreeSet::new(),
-            right,
-        )
-        .unwrap()])
-        .unwrap();
-        let request = RewriteRequest::new(
-            "disconnect",
-            RewriteMatch::new(
-                names.into_iter().map(|node| (node.clone(), node)).collect(),
-                BTreeMap::from([(Arc::from("ab"), Arc::from("ab"))]),
-                BTreeMap::new(),
-                BTreeMap::new(),
-            ),
-        );
-        let prepared = initial
-            .prepare_rewrite(&state, &grammar, &request, &BTreeMap::new())
-            .unwrap();
+        let prepared = prepare(&initial, &state, remove_edge_ab());
         let current = initial.commit_rewrite(&mut state, prepared).unwrap();
         let unsupported = emit(&current, &mut state, false);
         let before_calls = calls.load(Ordering::Relaxed);
@@ -1067,43 +1053,22 @@ mod tests {
         let mut state = initial.empty_state();
         let received = emit(&initial, &mut state, true);
         let tag = AuthorityTag::new("run").unwrap();
-        let right = RewriteFragment::new(
-            vec![Node::new("A").unwrap(), Node::new("B2").unwrap()],
-            vec![Edge::new("ab2", "A", "B2").unwrap()],
-            ["A", "B2"]
-                .map(|node| NodeDefinition::new(node, ["node"], "value").unwrap())
-                .to_vec(),
-            vec![
-                EdgeDefinition::new("ab2", ["flow"], ["node"], ["node"], "value", [tag.clone()])
-                    .unwrap(),
-            ],
-            vec![],
-            vec![RootRule::new("A", Authority::new([tag])).unwrap()],
-        );
-        let grammar = RewriteGrammar::new([RewriteProduction::new(
-            "replace-b",
-            RewriteFragment::from_kernel(&initial),
-            BTreeSet::from([Arc::from("A")]),
-            BTreeSet::new(),
-            right,
-        )
-        .unwrap()])
-        .unwrap();
-        let request = RewriteRequest::new(
-            "replace-b",
-            RewriteMatch::new(
-                BTreeMap::from([
-                    (Arc::from("A"), Arc::from("A")),
-                    (Arc::from("B"), Arc::from("B")),
-                ]),
-                BTreeMap::from([(Arc::from("ab"), Arc::from("ab"))]),
-                BTreeMap::from([(Arc::from("B2"), Arc::from("B2"))]),
-                BTreeMap::from([(Arc::from("ab2"), Arc::from("ab2"))]),
+        let replace_b = GraphEdit::new(
+            BTreeSet::from([Arc::from("B")]),
+            BTreeSet::from([Arc::from("ab")]),
+            GraphFragment::new(
+                vec![Node::new("B2").unwrap()],
+                vec![Edge::new("ab2", "A", "B2").unwrap()],
+                vec![NodeDefinition::new("B2", ["node"], "value").unwrap()],
+                vec![
+                    EdgeDefinition::new("ab2", ["flow"], ["node"], ["node"], "value", [tag])
+                        .unwrap(),
+                ],
+                vec![],
+                vec![],
             ),
         );
-        let prepared = initial
-            .prepare_rewrite(&state, &grammar, &request, &BTreeMap::new())
-            .unwrap();
+        let prepared = prepare(&initial, &state, replace_b);
         assert_eq!(
             prepared.retirements().get(&received),
             Some(&RetirementReason::HolderRemoved)
@@ -1155,36 +1120,7 @@ mod tests {
         .unwrap();
         let mut state = initial.empty_state();
         let received = emit(&initial, &mut state, true);
-        let right = RewriteFragment::new(
-            initial.graph().nodes().to_vec(),
-            vec![],
-            initial.node_definitions().to_vec(),
-            vec![],
-            vec![],
-            initial.roots().to_vec(),
-        );
-        let names: BTreeSet<Arc<str>> = [Arc::from("A"), Arc::from("B")].into();
-        let grammar = RewriteGrammar::new([RewriteProduction::new(
-            "disconnect",
-            RewriteFragment::from_kernel(&initial),
-            names.clone(),
-            BTreeSet::new(),
-            right,
-        )
-        .unwrap()])
-        .unwrap();
-        let request = RewriteRequest::new(
-            "disconnect",
-            RewriteMatch::new(
-                names.into_iter().map(|node| (node.clone(), node)).collect(),
-                BTreeMap::from([(Arc::from("ab"), Arc::from("ab"))]),
-                BTreeMap::new(),
-                BTreeMap::new(),
-            ),
-        );
-        let prepared = initial
-            .prepare_rewrite(&state, &grammar, &request, &BTreeMap::new())
-            .unwrap();
+        let prepared = prepare(&initial, &state, remove_edge_ab());
         assert_eq!(
             prepared.retirements().get(&received),
             Some(&RetirementReason::RouteRemoved)
@@ -1213,36 +1149,7 @@ mod tests {
         let mut state = initial.empty_state();
         let first = emit(&initial, &mut state, true);
         let second = emit(&initial, &mut state, true);
-        let right = RewriteFragment::new(
-            initial.graph().nodes().to_vec(),
-            vec![],
-            initial.node_definitions().to_vec(),
-            vec![],
-            vec![],
-            initial.roots().to_vec(),
-        );
-        let names: BTreeSet<Arc<str>> = [Arc::from("A"), Arc::from("B")].into();
-        let grammar = RewriteGrammar::new([RewriteProduction::new(
-            "disconnect",
-            RewriteFragment::from_kernel(&initial),
-            names.clone(),
-            BTreeSet::new(),
-            right,
-        )
-        .unwrap()])
-        .unwrap();
-        let request = RewriteRequest::new(
-            "disconnect",
-            RewriteMatch::new(
-                names.into_iter().map(|node| (node.clone(), node)).collect(),
-                BTreeMap::from([(Arc::from("ab"), Arc::from("ab"))]),
-                BTreeMap::new(),
-                BTreeMap::new(),
-            ),
-        );
-        let prepared = initial
-            .prepare_rewrite(&state, &grammar, &request, &BTreeMap::new())
-            .unwrap();
+        let prepared = prepare(&initial, &state, remove_edge_ab());
         let current = initial.commit_rewrite(&mut state, prepared).unwrap();
         // Both receipts crossed `ab` from `A` to `B` and stay live at `B`, but
         // the current graph no longer records the incidence of `ab`.
@@ -1328,11 +1235,11 @@ mod tests {
     #[test]
     fn fragment_encoding_round_trips_and_decodes_through_checked_constructors() {
         let (kernel, _) = fixture();
-        let data = FragmentData::from(&RewriteFragment::from_kernel(&kernel));
+        let data = FragmentData::from(&GraphFragment::from_kernel(&kernel));
         assert_eq!(data.version, FRAGMENT_ENCODING_VERSION);
         let json = serde_json::to_value(&data).unwrap();
         let decoded: FragmentData = serde_json::from_value(json.clone()).unwrap();
-        let fragment = RewriteFragment::try_from(decoded).unwrap();
+        let fragment = GraphFragment::try_from(decoded).unwrap();
         assert_eq!(
             kernel.admit_fragment(&fragment).unwrap().fingerprint(),
             kernel.fingerprint()
@@ -1348,7 +1255,7 @@ mod tests {
                 _ => malformed["nodes"][0]["id"] = serde_json::json!(""),
             }
             let decoded: FragmentData = serde_json::from_value(malformed).unwrap();
-            assert!(RewriteFragment::try_from(decoded).is_err(), "{field}");
+            assert!(GraphFragment::try_from(decoded).is_err(), "{field}");
         }
     }
 
@@ -1392,7 +1299,7 @@ mod tests {
                 [RootRule::new("A", Authority::new([tag])).unwrap()],
             )
             .unwrap();
-        let data = FragmentData::from(&RewriteFragment::from_kernel(&kernel));
+        let data = FragmentData::from(&GraphFragment::from_kernel(&kernel));
         let encoded = serde_json::to_string(&data).unwrap();
         let golden = concat!(
             r#"{"version":1,"#,

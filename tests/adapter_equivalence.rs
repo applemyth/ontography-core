@@ -9,21 +9,24 @@
 //! in-memory applier agree on every reachable state, including states reached
 //! through stale plans, node creation and deletion with fresh identities,
 //! outgoing edges swapped for rejecting ones so outbound work retires as
-//! `NoAcceptingEdge`, and rejected rewrites and extensions. The snapshot
-//! itself runs the adapter's own projection check, so a drifted index fails
-//! the step. A required prefix constructs the rare retirement and stale-plan
-//! cases before random exploration, so coverage is independent of generated ids.
+//! `NoAcceptingEdge`, route removal at the `All` receiver, composite edits
+//! that combine several changes in one transition, and refused edits and
+//! extensions. Refused edits cover every structural rejection, an admission
+//! failure, and a policy denial. The snapshot itself runs the adapter's own
+//! projection check, so a drifted index fails the step. A required prefix
+//! constructs the rare retirement, stale-plan, and refusal cases before random
+//! exploration, so coverage is independent of generated ids.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use ontography::{
     ActivationId, ActivationProposal, Authority, AuthorityTag, ContentDigest, Contract,
-    DefinitionId, Edge, EdgeDefinition, Emission, ExtensionError, Graph, IngressMode, Kernel, Node,
-    NodeDefinition, OutputAuthority, PackageId, PackageRecord, Payload, PendingFrontier, Phase,
-    ProposalDecision, ProposalRuntime, Retirement, RetirementReason, RewriteError, RewriteFragment,
-    RewriteGrammar, RewriteMatch, RewriteProduction, RewriteRequest, RootRule, Schema,
-    SessionHandle, State,
+    DefinitionId, Edge, EdgeDefinition, EditContext, EditPolicy, Emission, ExtensionError, Graph,
+    GraphEdit, GraphFragment, IngressMode, Kernel, Node, NodeDefinition, OutputAuthority,
+    PackageId, PackageRecord, Payload, PendingFrontier, Phase, PolicyDenial, Principal,
+    ProposalDecision, ProposalRuntime, Retirement, RetirementReason, RewriteError, RewriteRequest,
+    RootRule, Schema, SessionHandle, State,
 };
 
 /// Deterministic choice stream. Runtime-generated ids still affect the order
@@ -69,11 +72,11 @@ fn all_receiver(node: &str) -> NodeDefinition {
 }
 
 /// Graph: `a` (root) → `b` (Any) on the current `ab*` edge; `a` → `c` on the
-/// current `ac*` edge; `b` → `c` on the current `bc*` edge; `c` is an `All`
-/// receiver over its two incoming edges. A rewrite may add a node `d*` (Any)
-/// fed by `c` on `cd*` and delete it again, or swap `a`'s two outgoing edges
-/// for ones carrying the `reject` contract and back. Every edge carries the
-/// `route` tag.
+/// current `ac*` edge; `b` → `c` on the current `bc*` edge, when present; `c`
+/// is an `All` receiver over its incoming edges. An edit may drop or re-add
+/// the `b → c` edge, add a node `d*` (Any) fed by `c` on `cd*` and delete it
+/// again, or swap `a`'s two outgoing edges for ones carrying the `reject`
+/// contract and back, in any combination. Every edge carries the `route` tag.
 fn initial_kernel(result: &Contract, item: &Contract, reject: &Contract) -> Kernel {
     Kernel::admit(
         DefinitionId::new("equivalence").unwrap(),
@@ -119,98 +122,85 @@ fn extended_kernel(current: &Kernel) -> Kernel {
     .unwrap()
 }
 
-/// The `b`,`c` sub-definition with or without a `b → c` edge named `symbol`.
-fn bc_fragment(symbol: Option<&str>) -> RewriteFragment {
-    RewriteFragment::new(
-        vec![Node::new("b").unwrap(), Node::new("c").unwrap()],
-        symbol
-            .map(|edge| Edge::new(edge, "b", "c").unwrap())
-            .into_iter()
-            .collect(),
-        vec![
-            NodeDefinition::new("b", ["Node"], "result").unwrap(),
-            all_receiver("c"),
-        ],
-        symbol.map(edge_definition).into_iter().collect(),
-        Vec::new(),
-        Vec::new(),
-    )
-}
+/// The principal of every edit the suite expects to be admitted.
+const TESTER: &str = "tester";
 
-/// The `c` sub-definition alone, or with an `Any` node `d` fed on `cd`.
-fn cd_fragment(with_d: bool) -> RewriteFragment {
-    let mut nodes = vec![Node::new("c").unwrap()];
-    let mut definitions = vec![all_receiver("c")];
-    let mut edges = Vec::new();
-    let mut edge_definitions = Vec::new();
-    if with_d {
-        nodes.push(Node::new("d").unwrap());
-        definitions.push(NodeDefinition::new("d", ["Node"], "result").unwrap());
-        edges.push(Edge::new("cd", "c", "d").unwrap());
-        edge_definitions.push(edge_definition("cd"));
+/// Admits every edit except those the principal `denied` asks for, so both
+/// sides exercise a policy denial.
+struct RefuseDenied;
+
+impl EditPolicy for RefuseDenied {
+    fn permits(&self, context: &EditContext<'_>) -> Result<(), PolicyDenial> {
+        if context.principal.name() == "denied" {
+            Err(PolicyDenial::new("the principal `denied` may not edit"))
+        } else {
+            Ok(())
+        }
     }
-    RewriteFragment::new(
-        nodes,
-        edges,
-        definitions,
-        edge_definitions,
-        Vec::new(),
-        Vec::new(),
-    )
 }
 
-/// The `a`,`b`,`c` sub-definition with `a`'s two outgoing edges `x` and `y`,
-/// accepting or rejecting.
-fn a_fragment(rejecting: bool) -> RewriteFragment {
-    let definition = if rejecting {
-        rejecting_edge_definition
-    } else {
-        edge_definition
-    };
-    RewriteFragment::new(
-        vec![
-            Node::new("a").unwrap(),
-            Node::new("b").unwrap(),
-            Node::new("c").unwrap(),
-        ],
-        vec![
-            Edge::new("x", "a", "b").unwrap(),
-            Edge::new("y", "a", "c").unwrap(),
-        ],
-        vec![
-            NodeDefinition::new("a", ["Node"], "result").unwrap(),
-            NodeDefinition::new("b", ["Node"], "result").unwrap(),
-            all_receiver("c"),
-        ],
-        vec![definition("x"), definition("y")],
-        Vec::new(),
-        vec![RootRule::new("a", Authority::new([tag("route")])).unwrap()],
-    )
+/// Accumulates one graph edit.
+#[derive(Default)]
+struct EditBuilder {
+    remove_nodes: BTreeSet<Arc<str>>,
+    remove_edges: BTreeSet<Arc<str>>,
+    nodes: Vec<Node>,
+    edges: Vec<Edge>,
+    node_definitions: Vec<NodeDefinition>,
+    edge_definitions: Vec<EdgeDefinition>,
+    roots: Vec<RootRule>,
 }
 
-fn grammar() -> RewriteGrammar {
-    let abc: BTreeSet<Arc<str>> = [Arc::from("a"), Arc::from("b"), Arc::from("c")].into();
-    let bc: BTreeSet<Arc<str>> = [Arc::from("b"), Arc::from("c")].into();
-    let c: BTreeSet<Arc<str>> = [Arc::from("c")].into();
-    let production = |id: &str, left, interface: &BTreeSet<Arc<str>>, right| {
-        RewriteProduction::new(id, left, interface.clone(), BTreeSet::new(), right).unwrap()
-    };
-    RewriteGrammar::new([
-        production("drop", bc_fragment(Some("x")), &bc, bc_fragment(None)),
-        production("add", bc_fragment(None), &bc, bc_fragment(Some("x"))),
-        production("spawn", cd_fragment(false), &c, cd_fragment(true)),
-        production("reap", cd_fragment(true), &c, cd_fragment(false)),
-        production("poison", a_fragment(false), &abc, a_fragment(true)),
-        production("cure", a_fragment(true), &abc, a_fragment(false)),
-    ])
-    .unwrap()
-}
+impl EditBuilder {
+    fn remove_node(mut self, node: &str) -> Self {
+        self.remove_nodes.insert(Arc::from(node));
+        self
+    }
 
-fn same(pairs: &[(&str, &str)]) -> BTreeMap<Arc<str>, Arc<str>> {
-    pairs
-        .iter()
-        .map(|(symbol, actual)| (Arc::from(*symbol), Arc::from(*actual)))
-        .collect()
+    fn remove_edge(mut self, edge: &str) -> Self {
+        self.remove_edges.insert(Arc::from(edge));
+        self
+    }
+
+    /// Adds an `Any` receiver.
+    fn add_node(mut self, node: &str) -> Self {
+        self.nodes.push(Node::new(node).unwrap());
+        self.node_definitions
+            .push(NodeDefinition::new(node, ["Node"], "result").unwrap());
+        self
+    }
+
+    /// Adds the edge `definition` annotates, from `source` to `target`.
+    fn add_edge(mut self, definition: EdgeDefinition, source: &str, target: &str) -> Self {
+        self.edges
+            .push(Edge::new(definition.edge_id(), source, target).unwrap());
+        self.edge_definitions.push(definition);
+        self
+    }
+
+    fn add_root(mut self, node: &str) -> Self {
+        self.roots
+            .push(RootRule::new(node, Authority::new([tag("route")])).unwrap());
+        self
+    }
+
+    fn request(self, principal: &str) -> RewriteRequest {
+        RewriteRequest::new(
+            Principal::new(principal),
+            GraphEdit::new(
+                self.remove_nodes,
+                self.remove_edges,
+                GraphFragment::new(
+                    self.nodes,
+                    self.edges,
+                    self.node_definitions,
+                    self.edge_definitions,
+                    Vec::new(),
+                    self.roots,
+                ),
+            ),
+        )
+    }
 }
 
 fn payload(rng: &mut Rng) -> Payload {
@@ -233,9 +223,35 @@ struct Mirror {
     cd: Option<(String, String)>,
     fresh: usize,
     /// Which rarer shapes this seed exercised.
-    saw_stale: bool,
-    saw_reap: bool,
-    saw_no_accepting_edge: bool,
+    saw: BTreeSet<Scenario>,
+}
+
+/// The rarer shapes every seed must reach; the required prefix builds each.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum Scenario {
+    StalePlan,
+    HolderRemoved,
+    NoAcceptingEdge,
+    RouteRemoved,
+}
+
+impl Scenario {
+    const ALL: [Self; 4] = [
+        Self::StalePlan,
+        Self::HolderRemoved,
+        Self::NoAcceptingEdge,
+        Self::RouteRemoved,
+    ];
+
+    /// The scenario a rewrite's retirement exhibits.
+    fn retired(reason: RetirementReason) -> Option<Self> {
+        match reason {
+            RetirementReason::HolderRemoved => Some(Self::HolderRemoved),
+            RetirementReason::NoAcceptingEdge => Some(Self::NoAcceptingEdge),
+            RetirementReason::RouteRemoved => Some(Self::RouteRemoved),
+            RetirementReason::Explicit => None,
+        }
+    }
 }
 
 impl Mirror {
@@ -396,88 +412,128 @@ async fn check(session: &SessionHandle, mirror: &Mirror, step: usize, seed: u64)
     );
 }
 
-fn bc_request(mirror: &mut Mirror) -> RewriteRequest {
-    if let Some(current) = &mirror.bc_edge {
-        RewriteRequest::new(
-            "drop",
-            RewriteMatch::new(
-                same(&[("b", "b"), ("c", "c")]),
-                same(&[("x", current)]),
-                BTreeMap::new(),
-                BTreeMap::new(),
-            ),
-        )
+/// Drops the current `b → c` edge, or adds a fresh one.
+fn toggle_bc(edit: EditBuilder, mirror: &mut Mirror) -> EditBuilder {
+    if let Some(current) = mirror.bc_edge.clone() {
+        edit.remove_edge(&current)
     } else {
         let fresh = mirror.fresh_name("bc");
-        RewriteRequest::new(
-            "add",
-            RewriteMatch::new(
-                same(&[("b", "b"), ("c", "c")]),
-                BTreeMap::new(),
-                BTreeMap::new(),
-                same(&[("x", &fresh)]),
-            ),
-        )
+        edit.add_edge(edge_definition(&fresh), "b", "c")
+    }
+}
+
+/// Reaps the current `d` with its feeding edge, retiring whatever it holds as
+/// `HolderRemoved`, or spawns a fresh `d` fed by `c`.
+fn toggle_cd(edit: EditBuilder, mirror: &mut Mirror) -> EditBuilder {
+    if let Some((node, edge)) = mirror.cd.clone() {
+        edit.remove_node(&node).remove_edge(&edge)
+    } else {
+        let node = mirror.fresh_name("d");
+        let edge = mirror.fresh_name("cd");
+        edit.add_node(&node)
+            .add_edge(edge_definition(&edge), "c", &node)
     }
 }
 
 /// Swaps `a`'s outgoing edges for rejecting ones, or back, under fresh names.
-fn a_request(mirror: &mut Mirror) -> RewriteRequest {
+fn swap_a(edit: EditBuilder, mirror: &mut Mirror) -> EditBuilder {
     let rejecting = mirror
         .kernel
         .edge_definition(&mirror.ab_edge)
         .unwrap()
         .package_contract()
         == "reject";
-    let (ab, ac) = (mirror.fresh_name("ab"), mirror.fresh_name("ac"));
-    RewriteRequest::new(
-        if rejecting { "cure" } else { "poison" },
-        RewriteMatch::new(
-            same(&[("a", "a"), ("b", "b"), ("c", "c")]),
-            same(&[("x", &mirror.ab_edge), ("y", &mirror.ac_edge)]),
-            BTreeMap::new(),
-            same(&[("x", &ab), ("y", &ac)]),
-        ),
-    )
-}
-
-fn cd_request(mirror: &mut Mirror) -> RewriteRequest {
-    if let Some((node, edge)) = &mirror.cd {
-        RewriteRequest::new(
-            "reap",
-            RewriteMatch::new(
-                same(&[("c", "c"), ("d", node)]),
-                same(&[("cd", edge)]),
-                BTreeMap::new(),
-                BTreeMap::new(),
-            ),
-        )
+    let definition = if rejecting {
+        edge_definition
     } else {
-        let node = mirror.fresh_name("d");
-        let edge = mirror.fresh_name("cd");
-        RewriteRequest::new(
-            "spawn",
-            RewriteMatch::new(
-                same(&[("c", "c")]),
-                BTreeMap::new(),
-                same(&[("d", &node)]),
-                same(&[("cd", &edge)]),
-            ),
-        )
-    }
+        rejecting_edge_definition
+    };
+    let (ab, ac) = (mirror.fresh_name("ab"), mirror.fresh_name("ac"));
+    [mirror.ab_edge.clone(), mirror.ac_edge.clone()]
+        .iter()
+        .fold(edit, |edit, current| edit.remove_edge(current))
+        .add_edge(definition(&ab), "a", "b")
+        .add_edge(definition(&ac), "a", "c")
 }
 
-/// Runs one rewrite on both sides and compares the outcome variant for variant.
+/// A random combination of the three changes, possibly none, as one edit.
+fn composite_request(rng: &mut Rng, mirror: &mut Mirror) -> RewriteRequest {
+    let mut edit = EditBuilder::default();
+    if rng.below(2) == 0 {
+        edit = toggle_bc(edit, mirror);
+    }
+    if rng.below(2) == 0 {
+        edit = toggle_cd(edit, mirror);
+    }
+    if rng.below(2) == 0 {
+        edit = swap_a(edit, mirror);
+    }
+    edit.request(TESTER)
+}
+
+/// An edit the kernel must refuse, with a test of the refusal it must give.
+type Refusal = (RewriteRequest, fn(&RewriteError) -> bool);
+
+/// Edits the kernel must refuse: every structural rejection, an admission
+/// failure, and a policy denial.
+fn refused_requests(mirror: &mut Mirror) -> Vec<Refusal> {
+    let invalid: fn(&RewriteError) -> bool = |error| matches!(error, RewriteError::InvalidEdit(_));
+    let unadmitted: fn(&RewriteError) -> bool =
+        |error| matches!(error, RewriteError::Definition(_));
+    let denied: fn(&RewriteError) -> bool = |error| matches!(error, RewriteError::Denied(_));
+    let stray = mirror.fresh_name("stray");
+    vec![
+        // The edge to remove is absent.
+        (
+            EditBuilder::default()
+                .remove_edge("no-such-edge")
+                .request(TESTER),
+            invalid,
+        ),
+        // `c` always keeps `a → c`, which would dangle.
+        (
+            EditBuilder::default().remove_node("c").request(TESTER),
+            invalid,
+        ),
+        // `bc0` was used by the initial graph, whether or not it survives.
+        (
+            EditBuilder::default()
+                .add_edge(edge_definition("bc0"), "b", "c")
+                .request(TESTER),
+            invalid,
+        ),
+        // A surviving node keeps its definition, root rule included.
+        (
+            EditBuilder::default().add_root("b").request(TESTER),
+            invalid,
+        ),
+        // A fresh edge to a node that does not exist fails admission.
+        (
+            EditBuilder::default()
+                .add_edge(edge_definition(&stray), "b", "ghost")
+                .request(TESTER),
+            unadmitted,
+        ),
+        // A structurally sound edit the policy refuses.
+        (
+            toggle_bc(EditBuilder::default(), mirror).request("denied"),
+            denied,
+        ),
+    ]
+}
+
+/// Runs one rewrite on both sides and compares the outcome variant for
+/// variant, returning the shared refusal when both refuse.
 async fn rewrite_both(
     session: &SessionHandle,
     mirror: &mut Mirror,
-    grammar: &RewriteGrammar,
     request: &RewriteRequest,
-) {
+) -> Result<(), RewriteError> {
     let plan = session.prepare_rewrite(request).await.unwrap();
-    let prepared = mirror
-        .kernel
-        .prepare_rewrite(&mirror.state, grammar, request, &mirror.evidence);
+    let prepared =
+        mirror
+            .kernel
+            .prepare_rewrite(&mirror.state, &RefuseDenied, request, &mirror.evidence);
     match (plan, prepared) {
         (Ok(plan), Ok(prepared)) => {
             let retirements = prepared.retirements().clone();
@@ -490,18 +546,20 @@ async fn rewrite_both(
             mirror.refresh_topology();
             assert_eq!(outcome.revision(), mirror.state.revision());
             assert_eq!(outcome.retirements(), &retirements);
+            mirror
+                .saw
+                .extend(retirements.values().copied().filter_map(Scenario::retired));
+            Ok(())
         }
-        (Err(session_error), Err(mirror_error)) => assert_eq!(session_error, mirror_error),
+        (Err(session_error), Err(mirror_error)) => {
+            assert_eq!(session_error, mirror_error);
+            Err(mirror_error)
+        }
         (plan, prepared) => panic!("rewrite decisions diverged: {plan:?} versus {prepared:?}"),
     }
 }
 
-async fn step(
-    rng: &mut Rng,
-    session: &SessionHandle,
-    mirror: &mut Mirror,
-    grammar: &RewriteGrammar,
-) {
+async fn step(rng: &mut Rng, session: &SessionHandle, mirror: &mut Mirror) {
     let live: Vec<(PackageId, PackageRecord)> = mirror
         .state
         .live()
@@ -605,26 +663,27 @@ async fn step(
             let mirror_result = mirror.kernel.retire(&mut mirror.state, target, evidence);
             assert_eq!(session_result.unwrap(), mirror_result);
         }
-        // Rewrite: drop the current `b → c` edge or add a fresh one.
+        // Edit: any combination of dropping or re-adding `b → c`, spawning or
+        // reaping `d`, and swapping `a`'s edges, in one transition. The parts
+        // touch disjoint elements, so every combination, the empty edit
+        // included, is admissible.
         8 => {
-            let request = bc_request(mirror);
-            rewrite_both(session, mirror, grammar, &request).await;
+            let request = composite_request(rng, mirror);
+            rewrite_both(session, mirror, &request).await.unwrap();
         }
-        // Rewrite: spawn a fresh node `d` fed by `c`, or reap the current one,
+        // Edit: spawn a fresh node `d` fed by `c`, or reap the current one,
         // retiring whatever it holds as `HolderRemoved`.
         9 => {
-            let reaping = mirror.cd.is_some();
-            let request = cd_request(mirror);
-            rewrite_both(session, mirror, grammar, &request).await;
-            mirror.saw_reap |= reaping;
+            let request = toggle_cd(EditBuilder::default(), mirror).request(TESTER);
+            rewrite_both(session, mirror, &request).await.unwrap();
         }
         // A plan prepared, then overtaken by an activation, is stale on both sides.
         10 => {
-            let request = bc_request(mirror);
+            let request = toggle_bc(EditBuilder::default(), mirror).request(TESTER);
             let plan = session.prepare_rewrite(&request).await.unwrap().unwrap();
             let prepared = mirror
                 .kernel
-                .prepare_rewrite(&mirror.state, grammar, &request, &mirror.evidence)
+                .prepare_rewrite(&mirror.state, &RefuseDenied, &request, &mirror.evidence)
                 .unwrap();
             let root = ActivationProposal::root(
                 "a",
@@ -643,34 +702,20 @@ async fn step(
                     .unwrap_err(),
                 RewriteError::Stale
             );
-            mirror.saw_stale = true;
+            mirror.saw.insert(Scenario::StalePlan);
         }
-        // Rewrite: swap `a`'s outgoing edges for rejecting ones, retiring every
+        // Edit: swap `a`'s outgoing edges for rejecting ones, retiring every
         // outbound package at `a` as `NoAcceptingEdge`, or swap them back.
         11 => {
-            let request = a_request(mirror);
-            rewrite_both(session, mirror, grammar, &request).await;
-            mirror.saw_no_accepting_edge |= mirror.state.retired().any(|(_, record)| {
-                record.retirement().map(Retirement::reason)
-                    == Some(RetirementReason::NoAcceptingEdge)
-            });
+            let request = swap_a(EditBuilder::default(), mirror).request(TESTER);
+            rewrite_both(session, mirror, &request).await.unwrap();
         }
-        // Rewrites the kernel must reject, compared variant for variant.
+        // Edits the kernel must refuse, compared variant for variant.
         12 => {
-            let request = if rng.below(2) == 0 {
-                RewriteRequest::new(
-                    "drop",
-                    RewriteMatch::new(
-                        same(&[("b", "b"), ("c", "c")]),
-                        same(&[("x", "no-such-edge")]),
-                        BTreeMap::new(),
-                        BTreeMap::new(),
-                    ),
-                )
-            } else {
-                RewriteRequest::new("unregistered", RewriteMatch::default())
-            };
-            rewrite_both(session, mirror, grammar, &request).await;
+            let mut refused = refused_requests(mirror);
+            let (request, refusal) = refused.swap_remove(rng.below(refused.len()));
+            let error = rewrite_both(session, mirror, &request).await.unwrap_err();
+            assert!(refusal(&error), "unexpected refusal {error:?}");
         }
         // Extend the vocabulary; a second attempt is rejected on both sides.
         _ => {
@@ -720,24 +765,20 @@ async fn submit(session: &SessionHandle, mirror: &mut Mirror, proposal: Activati
     }
 }
 
-/// Establish every required coverage case by construction. In particular,
-/// reaching `d` requires a complete join at `c`; random choices of UUID-ordered
-/// packages cannot guarantee that path before a later reap.
-async fn required_prefix(
-    session: &SessionHandle,
-    mirror: &mut Mirror,
-    grammar: &RewriteGrammar,
-    seed: u64,
-) {
-    let spawn = cd_request(mirror);
-    rewrite_both(session, mirror, grammar, &spawn).await;
+/// Establish every required coverage case by construction, and return the
+/// number of checked steps it took. In particular, reaching `d` requires a
+/// complete join at `c`; random choices of UUID-ordered packages cannot
+/// guarantee that path before a later reap.
+async fn required_prefix(session: &SessionHandle, mirror: &mut Mirror, seed: u64) -> usize {
+    let spawn = toggle_cd(EditBuilder::default(), mirror).request(TESTER);
+    rewrite_both(session, mirror, &spawn).await.unwrap();
     check(session, mirror, 0, seed).await;
 
-    let request = bc_request(mirror);
+    let request = toggle_bc(EditBuilder::default(), mirror).request(TESTER);
     let session_plan = session.prepare_rewrite(&request).await.unwrap().unwrap();
     let mirror_plan = mirror
         .kernel
-        .prepare_rewrite(&mirror.state, grammar, &request, &mirror.evidence)
+        .prepare_rewrite(&mirror.state, &RefuseDenied, &request, &mirror.evidence)
         .unwrap();
 
     let bytes: Payload = Arc::from(b"prefix-item".as_slice());
@@ -776,7 +817,7 @@ async fn required_prefix(
             .unwrap_err(),
         RewriteError::Stale
     );
-    mirror.saw_stale = true;
+    mirror.saw.insert(Scenario::StalePlan);
     check(session, mirror, 2, seed).await;
 
     let at_b = mirror
@@ -798,7 +839,7 @@ async fn required_prefix(
     assert_eq!(inputs.len(), 2, "prefix must prepare the complete All join");
     let (holder, edge) = mirror.cd.clone().unwrap();
     let mut through_c = ActivationProposal::join(inputs, Arc::from(b"result".as_slice()));
-    through_c.emit(Emission::new(edge, OutputAuthority::Carry, bytes));
+    through_c.emit(Emission::new(edge, OutputAuthority::Carry, bytes.clone()));
     submit(session, mirror, through_c).await;
     check(session, mirror, 4, seed).await;
     let at_d = mirror
@@ -807,8 +848,8 @@ async fn required_prefix(
         .find(|(_, record)| record.holder() == holder)
         .unwrap()
         .0;
-    let reap = cd_request(mirror);
-    rewrite_both(session, mirror, grammar, &reap).await;
+    let reap = toggle_cd(EditBuilder::default(), mirror).request(TESTER);
+    rewrite_both(session, mirror, &reap).await.unwrap();
     assert_eq!(
         mirror
             .state
@@ -818,7 +859,6 @@ async fn required_prefix(
             .map(Retirement::reason),
         Some(RetirementReason::HolderRemoved)
     );
-    mirror.saw_reap = true;
     check(session, mirror, 5, seed).await;
 
     let outbound = mirror
@@ -827,8 +867,8 @@ async fn required_prefix(
         .find(|(_, record)| record.holder() == "a")
         .unwrap()
         .0;
-    let poison = a_request(mirror);
-    rewrite_both(session, mirror, grammar, &poison).await;
+    let poison = swap_a(EditBuilder::default(), mirror).request(TESTER);
+    rewrite_both(session, mirror, &poison).await.unwrap();
     assert_eq!(
         mirror
             .state
@@ -838,18 +878,72 @@ async fn required_prefix(
             .map(Retirement::reason),
         Some(RetirementReason::NoAcceptingEdge)
     );
-    mirror.saw_no_accepting_edge = true;
     check(session, mirror, 6, seed).await;
-    let cure = a_request(mirror);
-    rewrite_both(session, mirror, grammar, &cure).await;
+    let cure = swap_a(EditBuilder::default(), mirror).request(TESTER);
+    rewrite_both(session, mirror, &cure).await.unwrap();
     check(session, mirror, 7, seed).await;
+
+    // A receipt at the `All` receiver `c` on `b → c`, with no partner on
+    // `a → c`, retires as `RouteRemoved` when `b → c` is dropped.
+    let mut root = ActivationProposal::root(
+        "a",
+        Authority::new([tag("route")]),
+        Arc::from(b"result".as_slice()),
+    );
+    root.emit(Emission::new(
+        mirror.ab_edge.as_str(),
+        OutputAuthority::Carry,
+        bytes.clone(),
+    ));
+    submit(session, mirror, root).await;
+    check(session, mirror, 8, seed).await;
+    let at_b = mirror
+        .state
+        .live()
+        .find(|(_, record)| record.holder() == "b")
+        .unwrap()
+        .0;
+    let mut through_b = ActivationProposal::package(at_b, Arc::from(b"result".as_slice()));
+    through_b.emit(Emission::new(
+        mirror.bc_edge.as_deref().unwrap(),
+        OutputAuthority::Carry,
+        bytes,
+    ));
+    submit(session, mirror, through_b).await;
+    check(session, mirror, 9, seed).await;
+    let at_c = mirror
+        .state
+        .live()
+        .find(|(_, record)| record.holder() == "c")
+        .unwrap()
+        .0;
+    let drop_bc = toggle_bc(EditBuilder::default(), mirror).request(TESTER);
+    rewrite_both(session, mirror, &drop_bc).await.unwrap();
+    assert_eq!(
+        mirror
+            .state
+            .package(at_c)
+            .unwrap()
+            .retirement()
+            .map(Retirement::reason),
+        Some(RetirementReason::RouteRemoved)
+    );
+    check(session, mirror, 10, seed).await;
+
+    // Every refusal, each leaving both sides unchanged.
+    let mut index = 11;
+    for (request, refusal) in refused_requests(mirror) {
+        let error = rewrite_both(session, mirror, &request).await.unwrap_err();
+        assert!(refusal(&error), "seed {seed}: unexpected refusal {error:?}");
+        check(session, mirror, index, seed).await;
+        index += 1;
+    }
+    index
 }
 
 #[tokio::test]
 async fn sqlite_adapter_and_in_memory_state_agree_on_random_histories() {
-    let mut saw_stale = false;
-    let mut saw_holder_removed = false;
-    let mut saw_no_accepting_edge = false;
+    let mut saw = BTreeSet::new();
     for seed in 1..=12_u64 {
         let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
         let result = Contract::new("result", "Result", |_| Ok(())).unwrap();
@@ -866,8 +960,7 @@ async fn sqlite_adapter_and_in_memory_state_agree_on_random_histories() {
         })
         .unwrap();
         let kernel = Arc::new(initial_kernel(&result, &item, &reject));
-        let grammar = grammar();
-        let runtime = ProposalRuntime::with_grammar(Arc::clone(&kernel), grammar.clone());
+        let runtime = ProposalRuntime::with_policy(Arc::clone(&kernel), Arc::new(RefuseDenied));
         let session = runtime.open().unwrap();
         let mut mirror = Mirror {
             state: kernel.empty_state(),
@@ -879,33 +972,20 @@ async fn sqlite_adapter_and_in_memory_state_agree_on_random_histories() {
             bc_edge: Some("bc0".to_owned()),
             cd: None,
             fresh: 0,
-            saw_stale: false,
-            saw_reap: false,
-            saw_no_accepting_edge: false,
+            saw: BTreeSet::new(),
         };
-        required_prefix(&session, &mut mirror, &grammar, seed).await;
+        let prefix = required_prefix(&session, &mut mirror, seed).await;
         for step_index in 0..120 {
-            step(&mut rng, &session, &mut mirror, &grammar).await;
-            check(&session, &mirror, step_index + 8, seed).await;
+            step(&mut rng, &session, &mut mirror).await;
+            check(&session, &mirror, prefix + step_index, seed).await;
         }
         let final_state = session.snapshot().await;
         assert!(final_state.state().packages().values().all(
             |record| record.holder() != "" && matches!(record.phase(), Phase::In | Phase::Out)
         ));
-        saw_stale |= mirror.saw_stale;
-        saw_no_accepting_edge |= mirror.saw_no_accepting_edge;
-        saw_holder_removed |= mirror.saw_reap
-            && mirror.state.retired().any(|(_, record)| {
-                record.retirement().map(Retirement::reason) == Some(RetirementReason::HolderRemoved)
-            });
+        saw.extend(mirror.saw);
     }
-    assert!(saw_stale, "no seed exercised a stale rewrite plan");
-    assert!(
-        saw_holder_removed,
-        "no seed reaped a node that held live packages"
-    );
-    assert!(
-        saw_no_accepting_edge,
-        "no seed poisoned a's edges while it held outbound packages"
-    );
+    for scenario in Scenario::ALL {
+        assert!(saw.contains(&scenario), "no seed exercised {scenario:?}");
+    }
 }

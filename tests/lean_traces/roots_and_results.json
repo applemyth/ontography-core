@@ -1,8 +1,7 @@
 {
-  "format": "ontography-lean-trace/2",
+  "format": "ontography-lean-trace/3",
   "name": "roots_and_results",
   "validators": {"any": "accept_all", "even": "first_byte_even"},
-  "grammar": [],
   "definition": {
     "schema": {"node_types": ["n"], "object_types": ["t"], "tags": ["run", "audit", "admin"]},
     "contracts": [

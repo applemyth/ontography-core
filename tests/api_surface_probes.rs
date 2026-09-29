@@ -1,15 +1,15 @@
 //! Observable behavior at the application-to-kernel boundary.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ontography::project::ProjectConfig;
 use ontography::{
     ActivationProposal, ApplicationBuilder, ApplicationConfig, ApplicationContext, Authority,
-    ContextError, Contract, DefinitionId, ExecutionFailure, ExecutionStatus, Graph,
-    InvocationTrigger, Kernel, Node, NodeComponent, NodeConfig, NodeDefinition, Payload,
-    ProposalDecision, ProposalRuntime, RewriteError, RewriteFragment, RewriteGrammar, RewriteMatch,
-    RewriteProduction, RewriteRequest, RootRule, Schema, Trigger,
+    ContextError, Contract, DefinitionId, ExecutionFailure, ExecutionStatus, Graph, GraphEdit,
+    InvocationTrigger, Kernel, Node, NodeComponent, NodeConfig, NodeDefinition, Payload, PermitAll,
+    Principal, ProposalDecision, ProposalRuntime, RewriteError, RewriteRequest, RootRule, Schema,
+    Trigger,
 };
 
 fn payload(value: &'static [u8]) -> Payload {
@@ -129,10 +129,10 @@ fn both_declarative_formats_reject_duplicate_keys_inside_opaque_configuration() 
 }
 
 #[tokio::test]
-async fn direct_rewrite_grammar_is_caller_supplied_but_runtime_grammar_is_sealed() {
+async fn direct_edit_policy_is_caller_supplied_but_runtime_policy_is_sealed() {
     let kernel = Arc::new(
         Kernel::admit(
-            DefinitionId::new("grammar-boundary").unwrap(),
+            DefinitionId::new("policy-boundary").unwrap(),
             Schema::new(["Node"], ["Result"], []).unwrap(),
             Graph::new([Node::new("entry").unwrap()], []).unwrap(),
             [result_contract()],
@@ -143,29 +143,16 @@ async fn direct_rewrite_grammar_is_caller_supplied_but_runtime_grammar_is_sealed
         )
         .unwrap(),
     );
-    let fragment = RewriteFragment::from_kernel(&kernel);
-    let production = RewriteProduction::new(
-        "identity",
-        fragment.clone(),
-        BTreeSet::from([Arc::from("entry")]),
-        BTreeSet::new(),
-        fragment,
-    )
-    .unwrap();
-    let grammar = RewriteGrammar::new([production]).unwrap();
-    let request = RewriteRequest::new(
-        "identity",
-        RewriteMatch::new(
-            BTreeMap::from([(Arc::from("entry"), Arc::from("entry"))]),
-            BTreeMap::new(),
-            BTreeMap::new(),
-            BTreeMap::new(),
-        ),
-    );
+    let request = RewriteRequest::new(Principal::new("operator"), GraphEdit::default());
 
     assert!(
         kernel
-            .prepare_rewrite(&kernel.empty_state(), &grammar, &request, &BTreeMap::new())
+            .prepare_rewrite(
+                &kernel.empty_state(),
+                &PermitAll,
+                &request,
+                &BTreeMap::new()
+            )
             .is_ok()
     );
 
@@ -173,10 +160,10 @@ async fn direct_rewrite_grammar_is_caller_supplied_but_runtime_grammar_is_sealed
     let session = unconfigured.open().unwrap();
     assert!(matches!(
         session.prepare_rewrite(&request).await,
-        Ok(Err(RewriteError::UnknownProduction(_)))
+        Ok(Err(RewriteError::Denied(_)))
     ));
 
-    let configured = ProposalRuntime::with_grammar(kernel, grammar);
+    let configured = ProposalRuntime::with_policy(kernel, Arc::new(PermitAll));
     let session = configured.open().unwrap();
     assert!(session.prepare_rewrite(&request).await.unwrap().is_ok());
 }

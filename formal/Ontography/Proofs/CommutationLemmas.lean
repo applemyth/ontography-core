@@ -1,25 +1,24 @@
 import Ontography.Commutation
 import Ontography.Proofs.Basic
 import Ontography.Proofs.ActivationLemmas
+import Ontography.Proofs.Structural
 
 /-!
 # Lemmas for locality and commutation
 
-What `structural?` guarantees about its replacement, what `cleanup?` reads, and how both
-respect `Definition.Equiv`, for the proofs in `Ontography.Proofs.Commutation`.
+What a successful `structuralEdit?` guarantees about its replacement, what `cleanup?` reads,
+and how both respect `Definition.Equiv`, for the proofs in `Ontography.Proofs.Commutation`.
 
-`replace pr m Δ` is the replacement `structural?` builds for a match `m` of `pr` in `Δ`: `Δ`
-without what `m` binds outside the interface, plus `R ∖ K` under `m`'s fresh identities.
-Neither the deleted part nor the added part reads `Δ`, so two replacements commute, as sets,
-when neither deletes what the other adds (`replace_comm`). A successful `structural?` deletes
-only current identities and adds only unused ones (`structural?_replace`).
+An edit's replacement is `e.apply Δ`: `Δ` without what `e` removes, plus what `e` adds. The
+added part does not read `Δ`, so two edits commute, as sets, when neither removes what the
+other adds (`apply_comm`).
 
-`Shape` records the facts of a successful `structural?` that cleanup depends on: the deleted
-nodes are a function of the production and the match, and the replacement keeps the
-contracts and every retained node and edge with its annotation, and gives its new nodes and
-edges unused identities. From these, `cleanup_keep` shows that a package whose holder a
-rewrite does not affect is kept, and `cleanup_eq` that one rewrite decides the same fate for a
-package before and after a second rewrite that does not affect its holder.
+`Shape` records the facts of a successful `structuralEdit?` that cleanup depends on: the
+deleted nodes are the edit's removed nodes, and the replacement keeps the contracts and every
+retained node and edge with its annotation, and gives its new nodes and edges unused
+identities. From these, `cleanup_keep` shows that a package whose holder a rewrite does not
+affect is kept, and `cleanup_eq` that one rewrite decides the same fate for a package before
+and after a second rewrite that does not affect its holder.
 -/
 
 namespace Ontography.Proofs.Commute
@@ -240,155 +239,51 @@ theorem not_affected {Δ Δ' : Definition} {v : NodeId} (hv : v ∈ Δ.nodes)
     fun nd hnd hall => Classical.byContradiction fun hn =>
       h ⟨hv, .inr (.inr ⟨⟨nd, hnd, hall⟩, hn⟩)⟩⟩
 
-/-! ## The replacement as a function of the production and the match -/
+/-! ## Applying two edits -/
 
-section Replace
+section Apply
 
-/-- The nodes a match of `pr` deletes: the ones it binds outside the interface. -/
-def deleted (pr : Production) (m : Match) : List NodeId :=
-  (m.nodes.filter (·.1 ∉ pr.interfaceNodes)).map (·.2)
+variable {e₁ e₂ : Edit}
 
-/-- The edges a match of `pr` deletes: the ones it binds outside the interface. -/
-def deletedEdges (pr : Production) (m : Match) : List EdgeId :=
-  (m.edges.filter (·.1 ∉ pr.interfaceEdges)).map (·.2)
-
-/-- The identity a node symbol of `R` receives: its match in the interface, and its fresh
-allocation outside it. -/
-def place (pr : Production) (m : Match) (s : NodeId) : NodeId :=
-  (if s ∈ pr.interfaceNodes then m.nodes.lookup s else m.freshNodes.lookup s).getD s
-
-/-- `R ∖ K` under the match's fresh identities: what a rewrite adds. -/
-def fresh (pr : Production) (m : Match) : Fragment where
-  nodes := m.freshNodes.map (·.2)
-  edges := m.freshEdges.filterMap fun b =>
-    (pr.right.edges.find? (·.id == b.1)).map fun re =>
-      ⟨b.2, place pr m re.source, place pr m re.target⟩
-  nodeDefs := m.freshNodes.filterMap fun b =>
-    (pr.right.nodeDefs.find? (·.node == b.1)).map fun d => { d with node := b.2 }
-  edgeDefs := m.freshEdges.filterMap fun b =>
-    (pr.right.edgeDefs.find? (·.edge == b.1)).map fun d => { d with edge := b.2 }
-  transitions := m.freshNodes.flatMap fun b =>
-    (pr.right.transitions.filter (·.node == b.1)).map fun r => { r with node := b.2 }
-  roots := m.freshNodes.filterMap fun b =>
-    ((pr.right.roots.find? (·.node == b.1)).map (·.ceiling)).map fun c => ⟨b.2, c⟩
-
-/-- The replacement `structural?` builds for a match `m` of `pr` in `Δ`: `Δ` without the
-deleted part, plus the fresh part. Only the part it keeps reads `Δ`. -/
-def replace (pr : Production) (m : Match) (Δ : Definition) : Definition :=
-  { Δ with
-    nodes := Δ.nodes.filter (· ∉ deleted pr m) ++ (fresh pr m).nodes
-    edges := Δ.edges.filter (·.id ∉ deletedEdges pr m) ++ (fresh pr m).edges
-    nodeDefs := Δ.nodeDefs.filter (·.node ∉ deleted pr m) ++ (fresh pr m).nodeDefs
-    edgeDefs := Δ.edgeDefs.filter (·.edge ∉ deletedEdges pr m) ++ (fresh pr m).edgeDefs
-    transitions := Δ.transitions.filter (·.node ∉ deleted pr m) ++ (fresh pr m).transitions
-    roots := Δ.roots.filter (·.node ∉ deleted pr m) ++ (fresh pr m).roots }
-
-variable {pr pr₁ pr₂ : Production} {m m₁ m₂ : Match}
-
-/-- A successful `structural?` builds `replace pr m Δ`, deleting only nodes and edges of `Δ`
-and allocating only identities unused in `S`: `m` binds nodes that `Δ` defines and edges it
-has, and the allocation guards check the fresh ones. -/
-theorem structural?_replace {Δ : Definition} {S : State} {rep : Replacement}
-    (hΔ : Δ.Admitted) (h : structural? Δ S pr m = some rep) :
-    rep.next = replace pr m Δ ∧ (∀ v ∈ deleted pr m, v ∈ Δ.nodes) ∧
-      (∀ e ∈ deletedEdges pr m, e ∈ Δ.edges.map (·.id)) ∧
-      (∀ v ∈ (fresh pr m).nodes, v ∉ S.usedNodes) ∧
-      ∀ e ∈ m.freshEdges.map (·.2), e ∉ S.usedEdges := by
-  simp only [structural?, bind, Option.bind_eq_some_iff, Common.guard_eq_some, exists_const, pure,
-    Option.some.injEq] at h
-  obtain ⟨-, -, -, -, -, -, -, -, ⟨hkeys, hbound, -, -⟩, -, -, hnodes, hedges, hfn, hfe, -, -,
-    rfl⟩ := h
-  refine ⟨rfl, ?_, ?_, ?_, ?_⟩
-  · -- A bound node has a definition in `Δ`, so it is a node of `Δ`.
-    intro v hv
-    obtain ⟨b, hb, rfl⟩ := List.mem_map.1 hv
-    have hsame := hnodes b (List.mem_filter.1 hb).1
-    unfold SameNode at hsame
-    split at hsame
-    next _ d _ hd =>
-      obtain ⟨hmem, hnode⟩ := Common.nodeDef?_mem hd
-      exact hnode ▸ hΔ.nodeDefs_nodes d hmem
-    next => exact hsame.elim
-  · -- A bound edge is the image of an edge of `L`, which is an edge of `Δ`.
-    intro e he
-    obtain ⟨b, hb, rfl⟩ := List.mem_map.1 he
-    have hb := (List.mem_filter.1 hb).1
-    obtain ⟨le, hle, hid⟩ := List.mem_map.1 (hbound.1 (List.mem_map_of_mem hb))
-    obtain ⟨he', hmem, hlk, -⟩ := hedges le hle
-    rw [hid, lookup_of_mem hkeys hb, Option.some.injEq] at hlk
-    exact hlk ▸ List.mem_map_of_mem hmem
-  · intro v hv
-    obtain ⟨b, hb, rfl⟩ := List.mem_map.1 hv
-    exact hfn b hb
-  · intro e he
-    obtain ⟨b, hb, rfl⟩ := List.mem_map.1 he
-    exact hfe b hb
-
-/-! Everything the fresh part adds carries a fresh identity. -/
-
-theorem fresh_edges {e : Edge} (he : e ∈ (fresh pr m).edges) : e.id ∈ m.freshEdges.map (·.2) := by
-  obtain ⟨b, hb, hbe⟩ := List.mem_filterMap.1 he
-  obtain ⟨re, -, rfl⟩ := Option.map_eq_some_iff.1 hbe
-  exact List.mem_map_of_mem hb
-
-theorem fresh_nodeDefs {d : NodeDef} (hd : d ∈ (fresh pr m).nodeDefs) :
-    d.node ∈ (fresh pr m).nodes := by
-  obtain ⟨b, hb, hbd⟩ := List.mem_filterMap.1 hd
-  obtain ⟨d', -, rfl⟩ := Option.map_eq_some_iff.1 hbd
-  exact List.mem_map_of_mem hb
-
-theorem fresh_edgeDefs {d : EdgeDef} (hd : d ∈ (fresh pr m).edgeDefs) :
-    d.edge ∈ m.freshEdges.map (·.2) := by
-  obtain ⟨b, hb, hbd⟩ := List.mem_filterMap.1 hd
-  obtain ⟨d', -, rfl⟩ := Option.map_eq_some_iff.1 hbd
-  exact List.mem_map_of_mem hb
-
-theorem fresh_transitions {t : TransitionRule} (ht : t ∈ (fresh pr m).transitions) :
-    t.node ∈ (fresh pr m).nodes := by
-  obtain ⟨b, hb, ht⟩ := List.mem_flatMap.1 ht
-  obtain ⟨t', -, rfl⟩ := List.mem_map.1 ht
-  exact List.mem_map_of_mem hb
-
-theorem fresh_roots {r : RootRule} (hr : r ∈ (fresh pr m).roots) :
-    r.node ∈ (fresh pr m).nodes := by
-  obtain ⟨b, hb, hbr⟩ := List.mem_filterMap.1 hr
-  obtain ⟨c, -, rfl⟩ := Option.map_eq_some_iff.1 hbr
-  exact List.mem_map_of_mem hb
-
-/-- Two replacements commute, as sets, when neither deletes what the other adds: both orders
-keep the schema and contracts, and each component becomes the current one without both
-deleted parts, plus both fresh parts. -/
-theorem replace_comm {Δ : Definition}
-    (hn₁ : ∀ v ∈ (fresh pr₁ m₁).nodes, v ∉ deleted pr₂ m₂)
-    (hn₂ : ∀ v ∈ (fresh pr₂ m₂).nodes, v ∉ deleted pr₁ m₁)
-    (he₁ : ∀ e ∈ m₁.freshEdges.map (·.2), e ∉ deletedEdges pr₂ m₂)
-    (he₂ : ∀ e ∈ m₂.freshEdges.map (·.2), e ∉ deletedEdges pr₁ m₁) :
-    (replace pr₂ m₂ (replace pr₁ m₁ Δ)).Equiv (replace pr₁ m₁ (replace pr₂ m₂ Δ)) :=
-  ⟨setEq_refl _, setEq_refl _, setEq_refl _, setEq_refl _,
+/-- Two edits commute, as sets, when each defines only what it adds and neither removes what
+the other adds: both orders keep the schema and contracts, and each component becomes the
+current one without both removed parts, plus both added parts. -/
+theorem apply_comm {Δ : Definition} (hd₁ : e₁.DefinesOnlyAdded) (hd₂ : e₂.DefinesOnlyAdded)
+    (hn₁ : ∀ v ∈ e₁.add.nodes, v ∉ e₂.removeNodes)
+    (hn₂ : ∀ v ∈ e₂.add.nodes, v ∉ e₁.removeNodes)
+    (he₁ : ∀ ed ∈ e₁.add.edges, ed.id ∉ e₂.removeEdges)
+    (he₂ : ∀ ed ∈ e₂.add.edges, ed.id ∉ e₁.removeEdges) :
+    (e₂.apply (e₁.apply Δ)).Equiv (e₁.apply (e₂.apply Δ)) := by
+  -- An added edge annotation belongs to an added edge, so the other edit keeps it.
+  have hed : ∀ {e e' : Edit}, e.DefinesOnlyAdded → (∀ ed ∈ e.add.edges, ed.id ∉ e'.removeEdges) →
+      ∀ d ∈ e.add.edgeDefs, d.edge ∉ e'.removeEdges :=
+    fun hd he d hmem => by
+      obtain ⟨ed, hed, hid⟩ := List.mem_map.1 (hd.2.1 d hmem)
+      exact hid ▸ he ed hed
+  exact ⟨setEq_refl _, setEq_refl _, setEq_refl _, setEq_refl _,
     setEq_filter_append (fun v hv => decide_eq_true (hn₁ v hv))
       (fun v hv => decide_eq_true (hn₂ v hv)),
-    setEq_filter_append (fun _ he => decide_eq_true (he₁ _ (fresh_edges he)))
-      (fun _ he => decide_eq_true (he₂ _ (fresh_edges he))),
-    setEq_filter_append (fun _ hd => decide_eq_true (hn₁ _ (fresh_nodeDefs hd)))
-      (fun _ hd => decide_eq_true (hn₂ _ (fresh_nodeDefs hd))),
-    setEq_filter_append (fun _ hd => decide_eq_true (he₁ _ (fresh_edgeDefs hd)))
-      (fun _ hd => decide_eq_true (he₂ _ (fresh_edgeDefs hd))),
-    setEq_filter_append (fun _ ht => decide_eq_true (hn₁ _ (fresh_transitions ht)))
-      (fun _ ht => decide_eq_true (hn₂ _ (fresh_transitions ht))),
-    setEq_filter_append (fun _ hr => decide_eq_true (hn₁ _ (fresh_roots hr)))
-      (fun _ hr => decide_eq_true (hn₂ _ (fresh_roots hr)))⟩
+    setEq_filter_append (fun ed hed => decide_eq_true (he₁ ed hed))
+      (fun ed hed => decide_eq_true (he₂ ed hed)),
+    setEq_filter_append (fun d hd => decide_eq_true (hn₁ _ (hd₁.1 d hd)))
+      (fun d hd => decide_eq_true (hn₂ _ (hd₂.1 d hd))),
+    setEq_filter_append (fun d hd => decide_eq_true (hed hd₁ he₁ d hd))
+      (fun d hd => decide_eq_true (hed hd₂ he₂ d hd)),
+    setEq_filter_append (fun t ht => decide_eq_true (hn₁ _ (hd₁.2.2.1 t ht)))
+      (fun t ht => decide_eq_true (hn₂ _ (hd₂.2.2.1 t ht))),
+    setEq_filter_append (fun r hr => decide_eq_true (hn₁ _ (hd₁.2.2.2 r hr)))
+      (fun r hr => decide_eq_true (hn₂ _ (hd₂.2.2.2 r hr)))⟩
 
-end Replace
+end Apply
 
-/-! ## The replacement of a successful `structural?` -/
+/-! ## The replacement of a successful `structuralEdit?` -/
 
-/-- What cleanup depends on in a successful `structural? Δ S pr m`: the deleted nodes are the
-ones `m` binds outside the interface; the replacement is admitted, keeps the contracts and
-every node, edge, and annotation outside the deleted part, and its new nodes and edges have
-identities unused in `S`. -/
-structure Shape (Δ : Definition) (S : State) (pr : Production) (m : Match)
-    (rep : Replacement) : Prop where
-  deleted : rep.deleted = Commute.deleted pr m
+/-- What cleanup depends on in a successful `structuralEdit? Δ S e`: the deleted nodes are the
+ones `e` removes; the replacement is admitted, keeps the contracts and every node, edge, and
+annotation outside the deleted part, and its new nodes and edges have identities unused in
+`S`. -/
+structure Shape (Δ : Definition) (S : State) (e : Edit) (rep : Replacement) : Prop where
+  deleted : rep.deleted = e.removeNodes
   admitted : rep.next.Admitted
   contracts : rep.next.contracts = Δ.contracts
   nodes : rep.next.nodes = Δ.nodes.filter (· ∉ rep.deleted) ++ rep.freshNodes
@@ -399,27 +294,18 @@ structure Shape (Δ : Definition) (S : State) (pr : Production) (m : Match)
       ∃ added, rep.next.edgeDefs = Δ.edgeDefs.filter (·.edge ∉ gone) ++ added
   freshEdges : ∀ e ∈ rep.freshEdges, e.id ∉ S.usedEdges
 
-/-- A successful `structural?` has the shape cleanup relies on. -/
-theorem shape {Δ : Definition} {S : State} {pr : Production} {m : Match} {rep : Replacement}
-    (h : structural? Δ S pr m = some rep) : Shape Δ S pr m rep := by
-  simp only [structural?, bind, Option.bind_eq_some_iff, Common.guard_eq_some, exists_const, pure,
-    Option.some.injEq] at h
-  obtain ⟨-, -, -, -, -, -, -, -, -, -, -, -, -, hfn, hfe, -, hadm, rfl⟩ := h
-  refine ⟨rfl, hadm, rfl, rfl, ?_, ⟨_, rfl⟩, ⟨_, rfl, _, rfl⟩, ?_⟩
-  · intro v hv
-    obtain ⟨b, hb, rfl⟩ := List.mem_map.1 hv
-    exact hfn b hb
-  · intro e he
-    obtain ⟨b, hb, hbe⟩ := List.mem_filterMap.1 he
-    obtain ⟨re, -, rfl⟩ := Option.map_eq_some_iff.1 hbe
-    exact hfe b hb
+/-- A successful `structuralEdit?` has the shape cleanup relies on. -/
+theorem shape {Δ : Definition} {S : State} {e : Edit} {rep : Replacement}
+    (h : structuralEdit? Δ S e = some rep) : Shape Δ S e rep := by
+  obtain ⟨hv, rfl⟩ := Structural.structuralEdit?_eq_some.1 h
+  exact ⟨rfl, hv.admitted, rfl, rfl, hv.freshNodes, ⟨_, rfl⟩, ⟨_, rfl, _, rfl⟩, hv.freshEdges⟩
 
 namespace Shape
 
-variable {Δ : Definition} {S : State} {pr : Production} {m : Match} {rep : Replacement}
+variable {Δ : Definition} {S : State} {e : Edit} {rep : Replacement}
 
 /-- A current node survives exactly when it is not deleted. -/
-theorem mem_nodes (hs : Shape Δ S pr m rep) (hS : WF Δ S) {v : NodeId} (hv : v ∈ Δ.nodes) :
+theorem mem_nodes (hs : Shape Δ S e rep) (hS : WF Δ S) {v : NodeId} (hv : v ∈ Δ.nodes) :
     v ∈ rep.next.nodes ↔ v ∉ rep.deleted := by
   rw [hs.nodes, List.mem_append, List.mem_filter]
   constructor
@@ -430,7 +316,7 @@ theorem mem_nodes (hs : Shape Δ S pr m rep) (hS : WF Δ S) {v : NodeId} (hv : v
     exact .inl ⟨hv, by simpa using hd⟩
 
 /-- A retained node keeps its definition. -/
-theorem nodeDef?_eq (hs : Shape Δ S pr m rep) (hΔ : Δ.Admitted) {v : NodeId}
+theorem nodeDef?_eq (hs : Shape Δ S e rep) (hΔ : Δ.Admitted) {v : NodeId}
     (hv : v ∈ Δ.nodes) (hd : v ∉ rep.deleted) : rep.next.nodeDef? v = Δ.nodeDef? v := by
   obtain ⟨added, hdefs⟩ := hs.nodeDefs
   obtain ⟨nd, hnd⟩ := nodeDef?_isSome hΔ hv
@@ -445,7 +331,7 @@ theorem nodeDef?_eq (hs : Shape Δ S pr m rep) (hΔ : Δ.Admitted) {v : NodeId}
 
 /-- An edge identity present before and after names the same edge: a fresh edge has an
 unused identity. -/
-theorem edge_eq (hs : Shape Δ S pr m rep) (hΔ : Δ.Admitted) (hS : WF Δ S) {e e' : Edge}
+theorem edge_eq (hs : Shape Δ S e rep) (hΔ : Δ.Admitted) (hS : WF Δ S) {e e' : Edge}
     (he : e ∈ Δ.edges) (he' : e' ∈ rep.next.edges) (hid : e.id = e'.id) : e = e' := by
   obtain ⟨gone, hedges, -⟩ := hs.edges
   rw [hedges, List.mem_append] at he'
@@ -454,7 +340,7 @@ theorem edge_eq (hs : Shape Δ S pr m rep) (hΔ : Δ.Admitted) (hS : WF Δ S) {e
   · exact (hs.freshEdges e' he' (hid ▸ List.mem_map_of_mem (hS.edge_log he))).elim
 
 /-- A retained edge keeps its annotation. -/
-theorem edgeDef?_eq (hs : Shape Δ S pr m rep) (hΔ : Δ.Admitted) (hS : WF Δ S) {e : Edge}
+theorem edgeDef?_eq (hs : Shape Δ S e rep) (hΔ : Δ.Admitted) (hS : WF Δ S) {e : Edge}
     (he : e ∈ Δ.edges) (he' : e ∈ rep.next.edges) :
     rep.next.edgeDef? e.id = Δ.edgeDef? e.id := by
   obtain ⟨gone, hedges, added, hdefs⟩ := hs.edges
@@ -474,7 +360,7 @@ theorem edgeDef?_eq (hs : Shape Δ S pr m rep) (hΔ : Δ.Admitted) (hS : WF Δ S
   simpa [ha] using hkept
 
 /-- The contract registry is unchanged. -/
-theorem contract?_eq (hs : Shape Δ S pr m rep) (c : ContractId) :
+theorem contract?_eq (hs : Shape Δ S e rep) (c : ContractId) :
     rep.next.contract? c = Δ.contract? c := by
   unfold Definition.contract?
   rw [hs.contracts]
@@ -489,8 +375,8 @@ variable {accepts : ContractId → Bytes → Bool} {H : Bytes → Digest}
   {evidence : List (Digest × Bytes)}
 
 /-- Locality: cleanup keeps a live package whose holder the rewrite does not affect. -/
-theorem cleanup_keep {Δ : Definition} {S : State} {pr : Production} {m : Match}
-    {rep : Replacement} (hΔ : Δ.Admitted) (hS : WF Δ S) (hs : Shape Δ S pr m rep)
+theorem cleanup_keep {Δ : Definition} {S : State} {e : Edit} {rep : Replacement}
+    (hΔ : Δ.Admitted) (hS : WF Δ S) (hs : Shape Δ S e rep)
     {q : PackageId} {r : PackageRecord} (hr : S.packages q = some r) (hlive : r.status = .live)
     (hna : ¬ Affected Δ rep.next r.holder) :
     cleanup? accepts H Δ rep.next rep.deleted evidence r = some none := by
@@ -584,13 +470,13 @@ theorem cleanup?_congr {Δ Δ' next next' : Definition} {deleted : List NodeId}
         · rw [ite_eq_right hmem, ite_eq_right (mt hiff.2 hmem)]
 
 /-- A rewrite decides the same fate for a package before and after a second rewrite that
-does not affect its holder. The first applies `pr` at `m`, to `Δ` as `repA` and to `Δb` as
-`repBA`; `Δb` keeps the holder's outgoing edges; the second takes `repA.next` to `repAB.next`
-without affecting the holder; and both orders end in equivalent definitions. -/
-theorem cleanup_eq {Δ Δb : Definition} {S Sa Sb : State} {pr pr' : Production} {m m' : Match}
-    {repA repBA repAB : Replacement} (hS : WF Δ S) (hsA : Shape Δ S pr m repA)
-    (hsBA : Shape Δb Sb pr m repBA) (hSa : WF repA.next Sa)
-    (hsAB : Shape repA.next Sa pr' m' repAB) (hsame : repAB.next.Equiv repBA.next)
+does not affect its holder. The first applies `e`, to `Δ` as `repA` and to `Δb` as `repBA`;
+`Δb` keeps the holder's outgoing edges; the second takes `repA.next` to `repAB.next` without
+affecting the holder; and both orders end in equivalent definitions. -/
+theorem cleanup_eq {Δ Δb : Definition} {S Sa Sb : State} {e e' : Edit}
+    {repA repBA repAB : Replacement} (hS : WF Δ S) (hsA : Shape Δ S e repA)
+    (hsBA : Shape Δb Sb e repBA) (hSa : WF repA.next Sa)
+    (hsAB : Shape repA.next Sa e' repAB) (hsame : repAB.next.Equiv repBA.next)
     {r : PackageRecord} (hv : r.holder ∈ Δ.nodes)
     (hout : SetEq (Δ.outgoing r.holder) (Δb.outgoing r.holder))
     (hna : ¬ Affected repA.next repAB.next r.holder) :

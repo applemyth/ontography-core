@@ -10,14 +10,16 @@ use std::sync::Arc;
 use ontography::{ActivationId, Authority, Kernel, PackageId, PackageRecord};
 
 use crate::fixtures::{
-    LATE_CONTRACTS, LATE_NODE_TYPE, LATE_OBJECT_TYPE, LATE_TAG, annotation_in, annotation_of,
-    profile_in, profile_of,
+    Annotation, LATE_CONTRACTS, LATE_NODE_TYPE, LATE_OBJECT_TYPE, LATE_TAG, Profile, annotation_of,
+    profile_of,
 };
 use crate::format::{
-    AuthoritySpec, ContractSpec, Destination, EmissionSpec, MatchSpec, ProductionSpec, SchemaSpec,
-    TraceOp, TriggerSpec, Validator, authority, hex,
+    AuthoritySpec, ContractSpec, Destination, EditSpec, EmissionSpec, FragmentSpec, NodeSpec,
+    RootSpec, SchemaSpec, TraceOp, TransitionSpec, TriggerSpec, Validator, authority, hex,
 };
-use crate::run::{Identity, Run, activate, extend, pkgs, retire, rewrite, transfer};
+use crate::run::{
+    DENIED, Identity, MANAGER, Run, activate, extend, pkgs, retire, rewrite_by, transfer,
+};
 
 /// Deterministic xorshift choices.
 pub struct Rng(u64);
@@ -532,131 +534,236 @@ fn random_stray(run: &mut Run, rng: &mut Rng) {
 
 // Rewrites.
 
-/// Whether a match deletes a node that keeps an unmatched incident edge.
-fn dangles(kernel: &Kernel, production: &ProductionSpec, matching: &MatchSpec) -> bool {
-    let kept: BTreeSet<&String> = production.interface_nodes.iter().collect();
-    let kept_edges: BTreeSet<&String> = production.interface_edges.iter().collect();
-    let deleted: BTreeSet<&str> = matching
-        .nodes
+/// An edit under construction: the removals as sets, and the fragment added.
+#[derive(Default)]
+struct Draft {
+    remove_nodes: BTreeSet<String>,
+    remove_edges: BTreeSet<String>,
+    add: FragmentSpec,
+}
+
+impl Draft {
+    /// Removes `node` with every edge touching it.
+    fn drop_node(&mut self, kernel: &Kernel, node: &str) {
+        self.remove_nodes.insert(node.to_owned());
+        self.remove_edges.extend(incident(kernel, node));
+    }
+
+    fn finish(self) -> EditSpec {
+        EditSpec {
+            remove_nodes: self.remove_nodes.into_iter().collect(),
+            remove_edges: self.remove_edges.into_iter().collect(),
+            add: self.add,
+        }
+    }
+}
+
+fn incident(kernel: &Kernel, node: &str) -> Vec<String> {
+    kernel
+        .graph()
+        .edges()
         .iter()
-        .filter(|(symbol, _)| !kept.contains(symbol))
-        .map(|(_, host)| host.as_str())
-        .collect();
-    let deleted_edges: BTreeSet<&str> = matching
-        .edges
-        .iter()
-        .filter(|(symbol, _)| !kept_edges.contains(symbol))
-        .map(|(_, host)| host.as_str())
-        .collect();
-    kernel.graph().edges().iter().any(|edge| {
-        (deleted.contains(edge.source()) || deleted.contains(edge.target()))
-            && !deleted_edges.contains(edge.id())
+        .filter(|edge| edge.source() == node || edge.target() == node)
+        .map(|edge| edge.id().to_owned())
+        .collect()
+}
+
+fn types_of(kernel: &Kernel, node: &str) -> BTreeSet<String> {
+    profile_of(kernel, node).map_or_else(BTreeSet::new, |profile| profile.types().clone())
+}
+
+/// The kind of a random current node, sometimes carrying a type only an
+/// extension adds.
+fn node_kind(run: &Run, rng: &mut Rng) -> Option<Profile> {
+    let kernel = &run.kernel;
+    let profile = profile_of(kernel, rng.pick(&nodes(kernel))?)?;
+    Some(if rng.chance(5) {
+        profile.with_type(LATE_NODE_TYPE)
+    } else {
+        profile
     })
 }
 
-/// A legal match, preferring one whose deletions leave nothing dangling when
-/// a few tries find one.
-fn admissible_match(
-    run: &mut Run,
-    production: &ProductionSpec,
+/// The kind of a random current edge: usually as it is, sometimes with a
+/// contract that rejects every payload (which retires waiting work it would
+/// have carried), and sometimes needing a contract or tag only an extension
+/// adds.
+fn edge_kind(run: &Run, rng: &mut Rng) -> Option<Annotation> {
+    let kernel = &run.kernel;
+    let annotation = annotation_of(kernel, rng.pick(&edge_ids(kernel))?)?;
+    let rejecting = kernel
+        .contracts()
+        .iter()
+        .find(|contract| validator(run, contract.id()) == Some(&Validator::RejectAll))
+        .map_or("late_deny", |contract| contract.id())
+        .to_owned();
+    Some(match rng.below(100) {
+        0..=74 => annotation,
+        75..=89 => annotation.with_contract(&rejecting),
+        90..=94 => annotation.with_contract("late"),
+        _ => annotation.with_tag(LATE_TAG),
+    })
+}
+
+/// A current node that may be the source (or, with `source` false, the
+/// target) of an edge of `kind` whose other end has `other` types: usually
+/// one the kind's requirements admit, occasionally any.
+fn endpoint(
+    run: &Run,
     rng: &mut Rng,
-) -> Option<MatchSpec> {
-    let mut first = None;
-    for _ in 0..8 {
-        let matching = legal_match(run, production, rng)?;
-        if !dangles(&run.kernel, production, &matching) {
-            return Some(matching);
-        }
-        first.get_or_insert(matching);
+    kind: &Annotation,
+    source: bool,
+    other: &BTreeSet<String>,
+) -> Option<String> {
+    let kernel = &run.kernel;
+    let all = nodes(kernel);
+    let fitting: Vec<String> = all
+        .iter()
+        .filter(|node| {
+            let types = types_of(kernel, node);
+            if source {
+                kind.fits(&types, other)
+            } else {
+                kind.fits(other, &types)
+            }
+        })
+        .cloned()
+        .collect();
+    match rng.pick(&fitting) {
+        Some(node) if rng.chance(90) => Some(node.clone()),
+        _ => rng.pick(&all).cloned(),
     }
-    first
 }
 
-/// A match of `production` the kernel should admit: each `L` edge bound to a
-/// current edge of its kind between nodes of its end kinds, each other `L`
-/// node to a node of its kind, all injectively, and fresh identities for
-/// `R ∖ K`. `None` when the current graph has no such match.
-fn legal_match(run: &mut Run, production: &ProductionSpec, rng: &mut Rng) -> Option<MatchSpec> {
-    let kernel = Arc::clone(&run.kernel);
-    let left = &production.left;
-    let mut bound: BTreeMap<String, String> = BTreeMap::new();
-    let mut bound_edges: BTreeMap<String, String> = BTreeMap::new();
-    for pattern in &left.edges {
-        let kind = annotation_in(left, &pattern.id);
-        let ends = (
-            profile_in(left, &pattern.source),
-            profile_in(left, &pattern.target),
-        );
-        let candidates: Vec<&ontography::Edge> = kernel
-            .graph()
-            .edges()
-            .iter()
-            .filter(|host| {
-                annotation_of(&kernel, host.id()).as_ref() == Some(&kind)
-                    && !bound_edges.values().any(|id| id == host.id())
-                    && profile_of(&kernel, host.source()).as_ref() == Some(&ends.0)
-                    && profile_of(&kernel, host.target()).as_ref() == Some(&ends.1)
-                    && bound
-                        .get(&pattern.source)
-                        .is_none_or(|id| id == host.source())
-                    && bound
-                        .get(&pattern.target)
-                        .is_none_or(|id| id == host.target())
-                    && (pattern.source == pattern.target) == (host.source() == host.target())
-            })
-            .collect();
-        let host = *rng.pick(&candidates)?;
-        bound.insert(pattern.source.clone(), host.source().to_owned());
-        bound.insert(pattern.target.clone(), host.target().to_owned());
-        bound_edges.insert(pattern.id.clone(), host.id().to_owned());
-    }
-    for symbol in &left.nodes {
-        if bound.contains_key(symbol) {
-            continue;
-        }
-        let kind = profile_in(left, symbol);
-        let candidates: Vec<String> = nodes(&kernel)
-            .into_iter()
-            .filter(|id| {
-                profile_of(&kernel, id).as_ref() == Some(&kind)
-                    && !bound.values().any(|other| other == id)
-            })
-            .collect();
-        let host = rng.pick(&candidates)?.clone();
-        bound.insert(symbol.clone(), host);
-    }
-    if bound.values().collect::<BTreeSet<_>>().len() != bound.len() {
-        return None;
-    }
-    let kept: BTreeSet<&String> = production.interface_nodes.iter().collect();
-    let kept_edges: BTreeSet<&String> = production.interface_edges.iter().collect();
-    let fresh_nodes = production
-        .right
-        .nodes
-        .iter()
-        .filter(|symbol| !kept.contains(symbol))
-        .map(|symbol| (symbol.clone(), run.fresh_name("n")))
+/// A holder of live outbound work, whose outgoing edges an edit may change.
+fn waiting_holder(run: &Run, rng: &mut Rng) -> Option<String> {
+    let holders: Vec<String> = run
+        .live(|record| record.delivery().is_none())
+        .into_iter()
+        .map(|id| run.state.package(id).unwrap().holder().to_owned())
         .collect();
-    let fresh_edges = production
-        .right
-        .edges
-        .iter()
-        .filter(|edge| !kept_edges.contains(&edge.id))
-        .map(|edge| (edge.id.clone(), run.fresh_name("e")))
-        .collect();
-    Some(MatchSpec {
-        nodes: bound.into_iter().collect(),
-        edges: bound_edges.into_iter().collect(),
-        fresh_nodes,
-        fresh_edges,
-    })
+    rng.pick(&holders).cloned()
 }
 
-/// A legal match turned into one of the ways a match can fail.
-fn perturb(run: &mut Run, mut matching: MatchSpec, rng: &mut Rng) -> MatchSpec {
+/// An edge added between current nodes, often from a holder of waiting work,
+/// whose packages the kernel then rechecks against the holder's new outgoing
+/// edges.
+fn mend(run: &mut Run, rng: &mut Rng, draft: &mut Draft) {
+    let Some(kind) = edge_kind(run, rng) else {
+        return;
+    };
+    let source = match waiting_holder(run, rng) {
+        Some(holder) if rng.chance(45) => Some(holder),
+        _ => endpoint(run, rng, &kind, true, &BTreeSet::new()),
+    };
+    let Some(source) = source else {
+        return;
+    };
+    let source_types = types_of(&run.kernel, &source);
+    let target = if rng.chance(8) {
+        Some(source.clone())
+    } else {
+        endpoint(run, rng, &kind, false, &source_types)
+    };
+    if let Some(target) = target {
+        let id = run.fresh_name("e");
+        kind.connect(&mut draft.add, &id, &source, &target);
+    }
+}
+
+/// A node added of a current kind, sometimes wired to current nodes.
+fn spawn(run: &mut Run, rng: &mut Rng, draft: &mut Draft) {
+    let Some(profile) = node_kind(run, rng) else {
+        return;
+    };
+    let id = run.fresh_name("n");
+    profile.place(&mut draft.add, &id);
+    let types = profile.types().clone();
+    if rng.chance(50)
+        && let Some(kind) = edge_kind(run, rng)
+        && let Some(source) = endpoint(run, rng, &kind, true, &types)
+    {
+        let edge = run.fresh_name("e");
+        kind.connect(&mut draft.add, &edge, &source, &id);
+    }
+    if rng.chance(50)
+        && let Some(kind) = edge_kind(run, rng)
+        && let Some(target) = endpoint(run, rng, &kind, false, &types)
+    {
+        let edge = run.fresh_name("e");
+        kind.connect(&mut draft.add, &edge, &id, &target);
+    }
+}
+
+/// A node inserted on a current edge: the edge usually removed, which at an
+/// `All` receiver retires the receipts it delivered, and a node of the
+/// target's kind added between its ends.
+fn stage(run: &mut Run, rng: &mut Rng, draft: &mut Draft) {
     let kernel = Arc::clone(&run.kernel);
-    let hosts = nodes(&kernel);
-    let host_edges = edge_ids(&kernel);
+    let Some(edge) = rng.pick(kernel.graph().edges()).cloned() else {
+        return;
+    };
+    let (Some(kind), Some(profile)) = (
+        annotation_of(&kernel, edge.id()),
+        profile_of(&kernel, edge.target()),
+    ) else {
+        return;
+    };
+    if rng.chance(75) {
+        draft.remove_edges.insert(edge.id().to_owned());
+    }
+    let node = run.fresh_name("n");
+    profile.place(&mut draft.add, &node);
+    let (into, onward) = (run.fresh_name("e"), run.fresh_name("e"));
+    kind.connect(&mut draft.add, &into, edge.source(), &node);
+    kind.connect(&mut draft.add, &onward, &node, edge.target());
+}
+
+/// A node removed with its incident edges, sometimes bridged: an edge added
+/// from one of its predecessors to one of its successors.
+fn drop_node(run: &mut Run, rng: &mut Rng, draft: &mut Draft) {
+    let kernel = Arc::clone(&run.kernel);
+    let Some(node) = rng.pick(&nodes(&kernel)).cloned() else {
+        return;
+    };
+    draft.drop_node(&kernel, &node);
+    if !rng.chance(50) {
+        return;
+    }
+    let edges = kernel.graph().edges();
+    let incoming: Vec<_> = edges
+        .iter()
+        .filter(|edge| edge.target() == node && edge.source() != node)
+        .collect();
+    let outgoing: Vec<_> = edges
+        .iter()
+        .filter(|edge| edge.source() == node && edge.target() != node)
+        .collect();
+    if let (Some(into), Some(onward)) = (rng.pick(&incoming), rng.pick(&outgoing))
+        && let Some(kind) = annotation_of(&kernel, into.id())
+    {
+        let id = run.fresh_name("e");
+        kind.connect(&mut draft.add, &id, into.source(), onward.target());
+    }
+}
+
+/// A current edge removed.
+fn cut(run: &Run, rng: &mut Rng, draft: &mut Draft) {
+    if let Some(edge) = rng.pick(&edge_ids(&run.kernel)) {
+        draft.remove_edges.insert(edge.clone());
+    }
+}
+
+/// Identities of the run's lifetime that are no longer current.
+fn removed_ids(current: &[String], used: impl Iterator<Item = String>) -> Vec<String> {
+    used.filter(|id| !current.contains(id)).collect()
+}
+
+/// One of the ways an edit can fail, applied to an otherwise shaped edit.
+fn perturb(run: &mut Run, rng: &mut Rng, draft: &mut Draft) {
+    let kernel = Arc::clone(&run.kernel);
+    let current_nodes = nodes(&kernel);
+    let current_edges = edge_ids(&kernel);
     let used_nodes: Vec<String> = run
         .state
         .used_node_ids()
@@ -669,95 +776,127 @@ fn perturb(run: &mut Run, mut matching: MatchSpec, rng: &mut Rng) -> MatchSpec {
         .iter()
         .map(ToString::to_string)
         .collect();
-    match rng.below(7) {
-        // Not exact: a symbol left unbound.
-        0 if !matching.nodes.is_empty() || !matching.edges.is_empty() => {
-            if matching.edges.is_empty() || rng.chance(50) && !matching.nodes.is_empty() {
-                matching.nodes.remove(rng.below(matching.nodes.len()));
-            } else {
-                matching.edges.remove(rng.below(matching.edges.len()));
+    let survivors: Vec<String> = current_nodes
+        .iter()
+        .filter(|node| !draft.remove_nodes.contains(*node))
+        .cloned()
+        .collect();
+    match rng.below(10) {
+        // A removal the graph cannot make: never born, or already removed.
+        0 => {
+            let removed = removed_ids(&current_nodes, used_nodes.into_iter());
+            let node = rng
+                .pick(&removed)
+                .cloned()
+                .unwrap_or_else(|| "ghost".to_owned());
+            draft.remove_nodes.insert(node);
+        }
+        1 => {
+            let removed = removed_ids(&current_edges, used_edges.into_iter());
+            let edge = rng
+                .pick(&removed)
+                .cloned()
+                .unwrap_or_else(|| "zz".to_owned());
+            draft.remove_edges.insert(edge);
+        }
+        // A removed node left with an incident edge.
+        2 => {
+            let touched: Vec<&String> = current_nodes
+                .iter()
+                .filter(|node| !incident(&kernel, node).is_empty())
+                .collect();
+            if let Some(node) = rng.pick(&touched) {
+                draft.drop_node(&kernel, node);
+                let kept = rng.pick(&incident(&kernel, node)).cloned().unwrap();
+                draft.remove_edges.remove(&kept);
             }
         }
-        // Not injective: two symbols bound to one identity.
-        1 if matching.nodes.len() >= 2 => {
-            let first = matching.nodes[0].1.clone();
-            matching.nodes[1].1 = first;
-        }
-        1 if matching.fresh_edges.len() >= 2 => {
-            let first = matching.fresh_edges[0].1.clone();
-            matching.fresh_edges[1].1 = first;
-        }
-        // A fresh identity used before, current or removed.
-        2 if !matching.fresh_nodes.is_empty() => {
-            if let Some(used) = rng.pick(&used_nodes) {
-                let at = rng.below(matching.fresh_nodes.len());
-                matching.fresh_nodes[at].1.clone_from(used);
+        // An added node or edge reusing an identity of the run.
+        3 => {
+            if let (Some(profile), Some(used)) = (node_kind(run, rng), rng.pick(&used_nodes)) {
+                profile.place(&mut draft.add, used);
             }
         }
-        2 if !matching.fresh_edges.is_empty() => {
-            if let Some(used) = rng.pick(&used_edges) {
-                let at = rng.below(matching.fresh_edges.len());
-                matching.fresh_edges[at].1.clone_from(used);
+        4 => {
+            let (Some(kind), Some(used)) = (edge_kind(run, rng), rng.pick(&used_edges)) else {
+                return;
+            };
+            if let (Some(source), Some(target)) =
+                (rng.pick(&current_nodes), rng.pick(&current_nodes))
+            {
+                kind.connect(&mut draft.add, used, source, target);
             }
         }
         // An empty identity.
-        3 if !matching.fresh_nodes.is_empty() => matching.fresh_nodes[0].1.clear(),
-        // A node or edge of another kind or incidence.
-        4 if !matching.nodes.is_empty() => {
-            if let Some(host) = rng.pick(&hosts) {
-                let at = rng.below(matching.nodes.len());
-                matching.nodes[at].1.clone_from(host);
+        5 => {
+            if let Some(profile) = node_kind(run, rng) {
+                profile.place(&mut draft.add, "");
             }
         }
-        5 if !matching.edges.is_empty() => {
-            if let Some(host) = rng.pick(&host_edges) {
-                let at = rng.below(matching.edges.len());
-                matching.edges[at].1.clone_from(host);
+        // An annotation of a surviving node or edge.
+        6 => {
+            let Some(node) = rng.pick(&survivors) else {
+                return;
+            };
+            let profile = profile_of(&kernel, node).unwrap();
+            let tags: Vec<String> = kernel
+                .schema()
+                .authority_tags()
+                .map(|tag| tag.id().to_owned())
+                .collect();
+            match rng.below(3) {
+                0 => {
+                    let mut scratch = FragmentSpec::default();
+                    profile.place(&mut scratch, node);
+                    draft.add.node_definitions.extend(scratch.node_definitions);
+                }
+                1 => draft.add.roots.push(RootSpec {
+                    node: node.clone(),
+                    ceiling: rng.subset(&tags),
+                }),
+                _ => draft.add.transitions.push(TransitionSpec {
+                    node: node.clone(),
+                    source: rng.subset(&tags),
+                    target: rng.subset(&tags),
+                }),
             }
         }
-        // Not exact: a symbol the production does not have.
+        7 => {
+            if let Some(edge) = rng.pick(&current_edges) {
+                let kind = annotation_of(&kernel, edge).unwrap();
+                draft.add.edge_definitions.push(kind.definition(edge));
+            }
+        }
+        // A fragment admission refuses: a node added twice, an added node
+        // without a definition, or an added edge ending at a node the edit
+        // removes or the graph lacks.
+        8 => {
+            if let Some(repeated) = draft.add.nodes.first().cloned() {
+                let definition: Vec<NodeSpec> = draft
+                    .add
+                    .node_definitions
+                    .iter()
+                    .filter(|definition| definition.node == repeated)
+                    .cloned()
+                    .collect();
+                draft.add.nodes.push(repeated);
+                draft.add.node_definitions.extend(definition);
+            } else {
+                draft.add.nodes.push(run.fresh_name("n"));
+            }
+        }
         _ => {
-            if let Some(host) = rng.pick(&hosts) {
-                matching.nodes.push(("W".to_owned(), host.clone()));
-            }
+            let (Some(kind), Some(source)) = (edge_kind(run, rng), rng.pick(&current_nodes)) else {
+                return;
+            };
+            let target = rng
+                .pick(&draft.remove_nodes.iter().cloned().collect::<Vec<_>>())
+                .cloned()
+                .unwrap_or_else(|| "nowhere".to_owned());
+            let id = run.fresh_name("e");
+            kind.connect(&mut draft.add, &id, source, &target);
         }
     }
-    matching
-}
-
-/// A match chosen without regard to kinds, which usually fails.
-fn blind_match(run: &mut Run, production: &ProductionSpec, rng: &mut Rng) -> MatchSpec {
-    let kernel = Arc::clone(&run.kernel);
-    let hosts = nodes(&kernel);
-    let host_edges = edge_ids(&kernel);
-    let mut matching = MatchSpec::default();
-    for symbol in &production.left.nodes {
-        if let Some(host) = rng.pick(&hosts) {
-            matching.nodes.push((symbol.clone(), host.clone()));
-        }
-    }
-    for edge in &production.left.edges {
-        if let Some(host) = rng.pick(&host_edges) {
-            matching.edges.push((edge.id.clone(), host.clone()));
-        }
-    }
-    let kept: BTreeSet<&String> = production.interface_nodes.iter().collect();
-    for symbol in &production.right.nodes {
-        if !kept.contains(symbol) {
-            matching
-                .fresh_nodes
-                .push((symbol.clone(), run.fresh_name("n")));
-        }
-    }
-    let kept_edges: BTreeSet<&String> = production.interface_edges.iter().collect();
-    for edge in &production.right.edges {
-        if !kept_edges.contains(&edge.id) {
-            matching
-                .fresh_edges
-                .push((edge.id.clone(), run.fresh_name("e")));
-        }
-    }
-    matching
 }
 
 /// Evidence mapping each known commitment to another payload's bytes.
@@ -782,25 +921,36 @@ fn corrupted(run: &Run) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// A rewrite request: usually a legal match of a grammar production with
-/// complete evidence, sometimes a perturbed or blind match, missing or
-/// mismatched evidence, or a production outside the grammar.
+/// A rewrite: usually an edit of one or a few shapes built from the current
+/// graph's own kinds, with complete evidence, asked by the manager;
+/// sometimes perturbed into a failing edit, offered missing or mismatched
+/// evidence, or asked by the principal the policy refuses.
 fn random_rewrite(run: &mut Run, rng: &mut Rng) -> TraceOp {
-    if rng.chance(3) {
-        return rewrite("nope", MatchSpec::default(), run.known_evidence());
-    }
-    let production = run.productions[rng.below(run.productions.len())].clone();
-    let matching = match admissible_match(run, &production, rng) {
-        Some(matching) if !rng.chance(15) => matching,
-        Some(matching) => perturb(run, matching, rng),
-        None => blind_match(run, &production, rng),
+    let mut draft = Draft::default();
+    let shapes = match rng.below(100) {
+        0..=3 => 0,
+        4..=79 => 1,
+        _ => 2 + rng.below(2),
     };
+    for _ in 0..shapes {
+        match rng.below(100) {
+            0..=17 => cut(run, rng, &mut draft),
+            18..=45 => mend(run, rng, &mut draft),
+            46..=61 => spawn(run, rng, &mut draft),
+            62..=79 => stage(run, rng, &mut draft),
+            _ => drop_node(run, rng, &mut draft),
+        }
+    }
+    if rng.chance(15) {
+        perturb(run, rng, &mut draft);
+    }
     let evidence = match rng.below(100) {
         0..=84 => run.known_evidence(),
         85..=92 => BTreeMap::new(),
         _ => corrupted(run),
     };
-    rewrite(&production.id, matching, evidence)
+    let principal = if rng.chance(3) { DENIED } else { MANAGER };
+    rewrite_by(principal, draft.finish(), evidence)
 }
 
 // Extensions.

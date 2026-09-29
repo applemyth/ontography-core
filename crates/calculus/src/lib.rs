@@ -1,8 +1,8 @@
 //! The Ontography calculus: authority-governed workflow occurrence graphs.
 //!
 //! Graph declarations compile into immutable kernel versions. The kernel checks
-//! activations, transfers, explicit retirements, interface-preserving graph
-//! rewrites with local frontier cleanup, and monotone vocabulary extensions.
+//! activations, transfers, explicit retirements, graph edits admitted under a
+//! trusted policy with local frontier cleanup, and monotone vocabulary extensions.
 //! This crate holds the graph law alone; persistence, invocation context, and
 //! execution hosting live in the crates that build on it.
 
@@ -24,9 +24,9 @@ mod kernel;
 pub mod storage {
     pub use crate::kernel::{
         Activation, ActivationId, ApplyError, Binding, Checkpoint, CheckpointError, Delivery,
-        FRAGMENT_ENCODING_VERSION, FragmentData, FragmentDecodeError, FrontierView, Output,
-        PackageId, PackageRecord, PackageStatus, PackageView, Retirement, RetirementReason,
-        RewriteFragment, Transition, TransitionKind, Trigger,
+        FRAGMENT_ENCODING_VERSION, FragmentData, FragmentDecodeError, FrontierView, GraphFragment,
+        Output, PackageId, PackageRecord, PackageStatus, PackageView, Retirement, RetirementReason,
+        Transition, TransitionKind, Trigger,
     };
 }
 
@@ -37,11 +37,11 @@ pub use graph::{
 };
 pub use kernel::{
     Activation, ActivationId, ActivationProposal, ApplyError, Binding, Checkpoint, CheckpointError,
-    Delivery, Emission, ExtensionError, FRAGMENT_ENCODING_VERSION, FragmentData,
-    FragmentDecodeError, FrontierView, Kernel, Output, OutputAuthority, PackageId, PackageRecord,
-    PackageStatus, PackageView, Phase, Position, PreparedExtension, PreparedRewrite,
-    PreparedTransfer, Reject, RetireError, Retirement, RetirementReason, RewriteError,
-    RewriteFragment, RewriteGrammar, RewriteMatch, RewriteProduction, RewriteRequest, State,
-    StateParts, StateRestoreError, TransferError, TransferRejection, Transition, TransitionKind,
-    Trigger, TriggerWitness,
+    Delivery, DenyAll, EditContext, EditPolicy, Emission, ExtensionError,
+    FRAGMENT_ENCODING_VERSION, FragmentData, FragmentDecodeError, FrontierView, GraphEdit,
+    GraphFragment, Kernel, Output, OutputAuthority, PackageId, PackageRecord, PackageStatus,
+    PackageView, PermitAll, Phase, PolicyDenial, Position, PreparedExtension, PreparedRewrite,
+    PreparedTransfer, Principal, Reject, RetireError, Retirement, RetirementReason, RewriteError,
+    RewriteRequest, State, StateParts, StateRestoreError, TransferError, TransferRejection,
+    Transition, TransitionKind, Trigger, TriggerWitness,
 };

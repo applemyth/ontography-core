@@ -5,6 +5,7 @@ mod definition;
 mod extension;
 mod frontier;
 mod occurrence;
+mod policy;
 mod retire;
 mod rewrite;
 mod transition;
@@ -22,9 +23,10 @@ pub use occurrence::{
     Activation, ActivationId, Output, PackageId, PackageRecord, PackageStatus, State, StateParts,
     Trigger,
 };
+pub use policy::{DenyAll, EditContext, EditPolicy, PermitAll, PolicyDenial, Principal};
 pub use retire::RetireError;
 pub use rewrite::{
-    PreparedRewrite, PreparedTransfer, RewriteError, RewriteFragment, RewriteGrammar, RewriteMatch,
-    RewriteProduction, RewriteRequest, TransferError, TransferRejection,
+    GraphEdit, GraphFragment, PreparedRewrite, PreparedTransfer, RewriteError, RewriteRequest,
+    TransferError, TransferRejection,
 };
 pub use transition::{ApplyError, Binding, FrontierView, PackageView, Transition, TransitionKind};

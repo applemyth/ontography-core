@@ -1,17 +1,13 @@
 //! Reconstructing executable applications after a durable vocabulary extension.
 
 use ontography::{
-    ApplicationBuilder, ApplicationContext, ApplicationRunMode, Authority, Contract, Kernel,
-    NodeComponent, NodeConfig, RewriteFragment, RewriteGrammar, RewriteMatch, RewriteProduction,
-    RewriteRequest, Schema,
+    ApplicationBuilder, ApplicationContext, ApplicationRunMode, Authority, Contract, GraphEdit,
+    Kernel, NodeComponent, NodeConfig, PermitAll, Principal, RewriteRequest, Schema,
 };
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
 #[tokio::test]
-async fn extended_application_resumes_bindings_and_grammar_without_replaying_input() {
+async fn extended_application_resumes_bindings_and_edit_policy_without_replaying_input() {
     let launches = Arc::new(Mutex::new(Vec::new()));
     let observed = launches.clone();
     let result = Contract::new("result", "Result", |_| Ok(())).unwrap();
@@ -37,16 +33,6 @@ async fn extended_application_resumes_bindings_and_grammar_without_replaying_inp
         .unwrap();
     let application = builder.build().unwrap();
     let base = application.kernel();
-    let fragment = RewriteFragment::from_kernel(base);
-    let grammar = RewriteGrammar::new([RewriteProduction::new(
-        "identity",
-        fragment.clone(),
-        BTreeSet::from([Arc::from("entry")]),
-        BTreeSet::new(),
-        fragment,
-    )
-    .unwrap()])
-    .unwrap();
     let schema = Schema::new(
         base.schema().node_types().chain(["Worker"]),
         base.schema().object_types().chain(["Note"]),
@@ -69,7 +55,9 @@ async fn extended_application_resumes_bindings_and_grammar_without_replaying_inp
         .unwrap(),
     );
     let base_fingerprint = *base.fingerprint();
-    let application = application.with_grammar(grammar);
+    // Sessions deny every edit by default, so the identity edit below
+    // commits only if the rebuilt application kept this policy.
+    let application = application.with_policy(Arc::new(PermitAll));
     let directory = tempfile::tempdir().unwrap();
     let run = application
         .start_in(directory.path(), Arc::from(&b"once"[..]))
@@ -96,15 +84,7 @@ async fn extended_application_resumes_bindings_and_grammar_without_replaying_inp
         resumed.snapshot().await.kernel().fingerprint(),
         extended.fingerprint()
     );
-    let request = RewriteRequest::new(
-        "identity",
-        RewriteMatch::new(
-            BTreeMap::from([(Arc::from("entry"), Arc::from("entry"))]),
-            BTreeMap::new(),
-            BTreeMap::new(),
-            BTreeMap::new(),
-        ),
-    );
+    let request = RewriteRequest::new(Principal::new("operator"), GraphEdit::default());
     let plan = resumed
         .session()
         .prepare_rewrite(&request)

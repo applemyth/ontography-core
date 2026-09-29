@@ -1,15 +1,15 @@
-//! Direct-kernel probes for explicit retirement, local rewrite cleanup, and
-//! monotone vocabulary extension.
+//! Direct-kernel probes for explicit retirement, local cleanup of graph edits,
+//! and monotone vocabulary extension.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use ontography::{
     ActivationId, ActivationProposal, Authority, AuthorityTag, ContentDigest, Contract,
-    DefinitionId, Edge, EdgeDefinition, Emission, ExtensionError, Graph, IngressMode, Kernel, Node,
-    NodeDefinition, OutputAuthority, PackageId, Phase, Reject, RetireError, RetirementReason,
-    RewriteError, RewriteFragment, RewriteGrammar, RewriteMatch, RewriteProduction, RewriteRequest,
-    RootRule, Schema, State, StateRestoreError, TransferError,
+    DefinitionId, Edge, EdgeDefinition, Emission, ExtensionError, Graph, GraphEdit, GraphFragment,
+    IngressMode, Kernel, Node, NodeDefinition, OutputAuthority, PackageId, PermitAll, Phase,
+    Principal, Reject, RetireError, RetirementReason, RewriteError, RewriteRequest, RootRule,
+    Schema, State, StateRestoreError, TransferError,
 };
 
 fn bytes(value: &'static [u8]) -> Arc<[u8]> {
@@ -116,61 +116,69 @@ fn admit(
     .unwrap()
 }
 
-/// The sub-definition of `kernel` induced by `nodes`, as a rule-local fragment.
-fn fragment(kernel: &Kernel, nodes: &[&str]) -> RewriteFragment {
-    let keep: BTreeSet<&str> = nodes.iter().copied().collect();
-    let kept_edge = |id: &str| {
-        kernel
-            .graph()
-            .edge(id)
-            .is_some_and(|edge| keep.contains(edge.source()) && keep.contains(edge.target()))
-    };
-    RewriteFragment::new(
-        kernel
-            .graph()
-            .nodes()
-            .iter()
-            .filter(|node| keep.contains(node.id()))
-            .cloned()
-            .collect(),
-        kernel
-            .graph()
-            .edges()
-            .iter()
-            .filter(|edge| kept_edge(edge.id()))
-            .cloned()
-            .collect(),
-        kernel
-            .node_definitions()
-            .iter()
-            .filter(|node| keep.contains(node.node_id()))
-            .cloned()
-            .collect(),
-        kernel
-            .edge_definitions()
-            .iter()
-            .filter(|edge| kept_edge(edge.edge_id()))
-            .cloned()
-            .collect(),
-        Vec::new(),
-        kernel
-            .roots()
-            .iter()
-            .filter(|root| keep.contains(root.node_id()))
-            .cloned()
-            .collect(),
+/// The edit that turns `before` into `after`: elements only `before` has are
+/// removed, and elements only `after` has are added with their annotations.
+/// Elements both have must be annotated alike, since an edit keeps survivors.
+fn edit_to(before: &Kernel, after: &Kernel) -> RewriteRequest {
+    let (old, new) = (before.graph(), after.graph());
+    let added_node = |id: &str| old.node(id).is_none();
+    let added_edge = |id: &str| old.edge(id).is_none();
+    let removed = |ids: Vec<&str>| ids.into_iter().map(Arc::from).collect::<BTreeSet<_>>();
+    RewriteRequest::new(
+        Principal::new("test"),
+        GraphEdit::new(
+            removed(
+                old.nodes()
+                    .iter()
+                    .map(Node::id)
+                    .filter(|id| new.node(id).is_none())
+                    .collect(),
+            ),
+            removed(
+                old.edges()
+                    .iter()
+                    .map(Edge::id)
+                    .filter(|id| new.edge(id).is_none())
+                    .collect(),
+            ),
+            GraphFragment::new(
+                new.nodes()
+                    .iter()
+                    .filter(|node| added_node(node.id()))
+                    .cloned()
+                    .collect(),
+                new.edges()
+                    .iter()
+                    .filter(|edge| added_edge(edge.id()))
+                    .cloned()
+                    .collect(),
+                after
+                    .node_definitions()
+                    .iter()
+                    .filter(|definition| added_node(definition.node_id()))
+                    .cloned()
+                    .collect(),
+                after
+                    .edge_definitions()
+                    .iter()
+                    .filter(|definition| added_edge(definition.edge_id()))
+                    .cloned()
+                    .collect(),
+                after
+                    .authority_transitions()
+                    .iter()
+                    .filter(|rule| added_node(rule.node_id()))
+                    .cloned()
+                    .collect(),
+                after
+                    .roots()
+                    .iter()
+                    .filter(|root| added_node(root.node_id()))
+                    .cloned()
+                    .collect(),
+            ),
+        ),
     )
-}
-
-fn ids(pairs: &[(&str, &str)]) -> BTreeMap<Arc<str>, Arc<str>> {
-    pairs
-        .iter()
-        .map(|(symbol, actual)| (Arc::from(*symbol), Arc::from(*actual)))
-        .collect()
-}
-
-fn names(values: &[&str]) -> BTreeSet<Arc<str>> {
-    values.iter().map(|value| Arc::from(*value)).collect()
 }
 
 fn root(kernel: &Kernel, state: &mut State, emissions: &[Emission]) -> ActivationId {
@@ -319,24 +327,7 @@ fn removing_one_route_of_an_all_receiver_retires_only_that_receipt() {
         &[("e1", "item", "route")],
         IngressMode::All,
     );
-    let grammar = RewriteGrammar::new([RewriteProduction::new(
-        "drop-e2",
-        fragment(&two, &["a", "b"]),
-        names(&["a", "b"]),
-        names(&["e1"]),
-        fragment(&one, &["a", "b"]),
-    )
-    .unwrap()])
-    .unwrap();
-    let request = RewriteRequest::new(
-        "drop-e2",
-        RewriteMatch::new(
-            ids(&[("a", "a"), ("b", "b")]),
-            ids(&[("e1", "e1"), ("e2", "e2")]),
-            ids(&[]),
-            ids(&[]),
-        ),
-    );
+    let drop_e2 = edit_to(&two, &one);
 
     let mut state = two.empty_state();
     let producer = root(&two, &mut state, &[delivered("e1"), delivered("e2")]);
@@ -345,7 +336,7 @@ fn removing_one_route_of_an_all_receiver_retires_only_that_receipt() {
         PackageId::from_parts(producer, 1),
     );
     let prepared = two
-        .prepare_rewrite(&state, &grammar, &request, &BTreeMap::new())
+        .prepare_rewrite(&state, &PermitAll, &drop_e2, &BTreeMap::new())
         .unwrap();
     assert_eq!(
         prepared.retirements().iter().collect::<Vec<_>>(),
@@ -381,44 +372,18 @@ fn disjoint_rewrites_commute_on_the_frontier() {
         &[("e1", "result", "route")],
         IngressMode::Any,
     );
-    let connect = |id: &str, right: &Kernel| {
-        RewriteProduction::new(
-            id,
-            fragment(&without, &["a", "b"]),
-            names(&["a", "b"]),
-            BTreeSet::new(),
-            fragment(right, &["a", "b"]),
-        )
-        .unwrap()
-    };
-    let grammar = RewriteGrammar::new([
-        RewriteProduction::new(
-            "far",
-            fragment(&without, &["far"]),
-            names(&["far"]),
-            BTreeSet::new(),
-            fragment(&without, &["far"]),
-        )
-        .unwrap(),
-        connect("accept", &accepting),
-        connect("reject", &rejecting),
-    ])
-    .unwrap();
-    let far = RewriteRequest::new(
-        "far",
-        RewriteMatch::new(ids(&[("far", "far")]), ids(&[]), ids(&[]), ids(&[])),
+    // A real change elsewhere in the graph: a fresh node beside `far`, which
+    // holds no packages.
+    let far = edit_to(
+        &without,
+        &admit(
+            "commute",
+            &vocabulary,
+            &["a", "b", "far", "far2"],
+            &[],
+            IngressMode::Any,
+        ),
     );
-    let route = |id: &str| {
-        RewriteRequest::new(
-            id,
-            RewriteMatch::new(
-                ids(&[("a", "a"), ("b", "b")]),
-                ids(&[]),
-                ids(&[]),
-                ids(&[("e1", "e1")]),
-            ),
-        )
-    };
     let evidence = BTreeMap::from([(ContentDigest::compute(b"item"), bytes(b"item"))]);
 
     let run = |order: [&RewriteRequest; 2]| {
@@ -427,7 +392,7 @@ fn disjoint_rewrites_commute_on_the_frontier() {
         let mut kernel = Arc::clone(&without);
         for request in order {
             let prepared = kernel
-                .prepare_rewrite(&state, &grammar, request, &evidence)
+                .prepare_rewrite(&state, &PermitAll, request, &evidence)
                 .unwrap();
             kernel = kernel.commit_rewrite(&mut state, prepared).unwrap();
         }
@@ -439,7 +404,7 @@ fn disjoint_rewrites_commute_on_the_frontier() {
         )
     };
 
-    let accept = route("accept");
+    let accept = edit_to(&without, &accepting);
     let far_first = run([&far, &accept]);
     let route_first = run([&accept, &far]);
     assert_eq!(far_first.0, route_first.0);
@@ -450,7 +415,7 @@ fn disjoint_rewrites_commute_on_the_frontier() {
 
     // A route the package cannot use retires it in both orders. Only the
     // revision stamp differs, because a different step retired it.
-    let reject = route("reject");
+    let reject = edit_to(&without, &rejecting);
     let far_first = run([&far, &reject]);
     let route_first = run([&reject, &far]);
     assert_eq!(far_first.0, route_first.0);
@@ -484,35 +449,19 @@ fn vocabulary_extension_admits_only_monotone_additions() {
     let package = PackageId::from_parts(root(&base, &mut state, &[outbound()]), 0);
     let before_extension = state.clone();
 
-    let grammar = RewriteGrammar::new([RewriteProduction::new(
-        "connect",
-        fragment(&base, &["a", "b"]),
-        names(&["a", "b"]),
-        BTreeSet::new(),
-        fragment(
-            &admit(
-                "ext",
-                &extended_vocabulary,
-                &["a", "b"],
-                &[("e1", "note", "extra")],
-                IngressMode::Any,
-            ),
+    // An edge carrying the extension's contract and tag.
+    let connect = edit_to(
+        &base,
+        &admit(
+            "ext",
+            &extended_vocabulary,
             &["a", "b"],
-        ),
-    )
-    .unwrap()])
-    .unwrap();
-    let connect = RewriteRequest::new(
-        "connect",
-        RewriteMatch::new(
-            ids(&[("a", "a"), ("b", "b")]),
-            ids(&[]),
-            ids(&[]),
-            ids(&[("e1", "e1")]),
+            &[("e1", "note", "extra")],
+            IngressMode::Any,
         ),
     );
     assert!(matches!(
-        base.prepare_rewrite(&before_extension, &grammar, &connect, &BTreeMap::new()),
+        base.prepare_rewrite(&before_extension, &PermitAll, &connect, &BTreeMap::new()),
         Err(RewriteError::Definition(_))
     ));
 
@@ -538,7 +487,7 @@ fn vocabulary_extension_admits_only_monotone_additions() {
     // The new edge carries the new contract, whose object type is Note, so the
     // outbound Item at `a` is rechecked (its holder's edges changed) and retired.
     let prepared = current
-        .prepare_rewrite(&state, &grammar, &connect, &BTreeMap::new())
+        .prepare_rewrite(&state, &PermitAll, &connect, &BTreeMap::new())
         .unwrap();
     assert_eq!(
         prepared.retirements().get(&package),

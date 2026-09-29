@@ -720,8 +720,8 @@ theorem replay_sound {h : List (ActivationId × Activation)} {evidence : Digest 
 
 /-- A reachable workflow whose revision counts only its activations was reached by
 activations alone, under its current definition. -/
-theorem activationRun_of_revision {grammar : List Production}
-    (h : SysReachable accepts H grammar Δ S) (hrevision : S.revision = S.activationIds.length) :
+theorem activationRun_of_revision {permits : Policy}
+    (h : SysReachable accepts H permits Δ S) (hrevision : S.revision = S.activationIds.length) :
     ∃ payloads, ActivationRun accepts H Δ S payloads := by
   -- `revision - |A|` never decreases, and only an activation keeps it.
   suffices key : S.activationIds.length ≤ S.revision ∧
@@ -758,7 +758,7 @@ theorem activationRun_of_revision {grammar : List Production}
         obtain ⟨_, -, -, -, rfl⟩ := Common.retire_eq_some hstep'
         exact .inl rfl
     | rewrite req evidence =>
-      obtain ⟨_, _, -, -, -, -, hids, -⟩ := rewrite_spec (wf_of_sysReachable hreach).2 hstep
+      obtain ⟨_, -, -, -, hids, -⟩ := rewrite_spec (wf_of_sysReachable hreach).2 hstep
       exact .inl hids
     | extend schema contracts =>
       obtain ⟨-, rfl⟩ := extend_spec hstep

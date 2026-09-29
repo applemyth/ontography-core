@@ -3,12 +3,13 @@ import Ontography.Invariants
 /-!
 # Graph rewriting and vocabulary extension
 
-MATHEMATICAL_DEFINITION §5–§6. A rewrite applies a registered production `L ← K → R` at
-an injective, annotation-exact match, allocates fresh identities for `R ∖ K`, admits the
-complete replacement definition, and retires the live packages its cleanup table names. An
-extension enlarges the schema and the contract registry and changes nothing else.
+MATHEMATICAL_DEFINITION §5–§6. A rewrite applies an explicit edit: it removes current nodes
+and edges, adds a fragment under identities never used before, admits the complete
+replacement definition, retires the live packages its cleanup table names, and takes effect
+only if the policy permits the principal that asks for it. An extension enlarges the schema
+and the contract registry and changes nothing else.
 
-The construction follows the kernel's `structural_rewrite`, `evaluate_rewrite`, and
+The construction follows the kernel's `structural_edit`, `evaluate_rewrite`, and
 `evaluate_extension`. Every comparison is a set comparison, as the kernel's sorted
 collections make it. Payload evidence is a list of `(digest, bytes)` pairs; cleanup asks for
 the bytes of a package only when some candidate edge's metadata accepts it, and a missing or
@@ -53,65 +54,16 @@ instance (Δ : Definition) : Decidable Δ.Admitted :=
         ⟨h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11, h12, h13, h14, h15, h16, h17, h18, h19,
           h20⟩⟩
 
-/-- `v`'s authority-transition pairs. -/
-def rulesOf (Δ : Definition) (v : NodeId) : List (Authority × Authority) :=
-  (Δ.transitions.filter (·.node == v)).map fun r => (r.source, r.target)
-
 /-- The outgoing edge identities of `v`. -/
 def outgoing (Δ : Definition) (v : NodeId) : List EdgeId :=
   (Δ.edges.filter (·.source == v)).map (·.id)
 
 end Definition
 
-/-- Equal as sets of pairs of authority sets. -/
-def PairSetEq (rs ss : List (Authority × Authority)) : Prop :=
-  (∀ r ∈ rs, ∃ s ∈ ss, SetEq r.1 s.1 ∧ SetEq r.2 s.2) ∧
-    ∀ s ∈ ss, ∃ r ∈ rs, SetEq r.1 s.1 ∧ SetEq r.2 s.2
+/-! ## Edits -/
 
-instance (rs ss : List (Authority × Authority)) : Decidable (PairSetEq rs ss) := by
-  unfold PairSetEq; infer_instance
-
-/-- Equal root ceilings: both absent, or equal as sets. -/
-def CeilingEq : Option Authority → Option Authority → Prop
-  | none, none => True
-  | some a, some b => SetEq a b
-  | _, _ => False
-
-instance : (a b : Option Authority) → Decidable (CeilingEq a b)
-  | none, none => isTrue trivial
-  | some a, some b => inferInstanceAs (Decidable (SetEq a b))
-  | none, some _ => isFalse id
-  | some _, none => isFalse id
-
-/-- Node `a` of `Δ₁` and node `b` of `Δ₂` have the same local definition: types, result
-contract, ingress, root ceiling, and authority transitions. -/
-def SameNode (Δ₁ : Definition) (a : NodeId) (Δ₂ : Definition) (b : NodeId) : Prop :=
-  match Δ₁.nodeDef? a, Δ₂.nodeDef? b with
-  | some d₁, some d₂ =>
-    SetEq d₁.types d₂.types ∧ d₁.resultContract = d₂.resultContract ∧
-      d₁.ingress = d₂.ingress ∧ CeilingEq (Δ₁.ceiling? a) (Δ₂.ceiling? b) ∧
-      PairSetEq (Δ₁.rulesOf a) (Δ₂.rulesOf b)
-  | _, _ => False
-
-instance (Δ₁ : Definition) (a : NodeId) (Δ₂ : Definition) (b : NodeId) :
-    Decidable (SameNode Δ₁ a Δ₂ b) := by
-  unfold SameNode; split <;> infer_instance
-
-/-- Edge `a` of `Δ₁` and edge `b` of `Δ₂` have the same annotation. -/
-def SameEdge (Δ₁ : Definition) (a : EdgeId) (Δ₂ : Definition) (b : EdgeId) : Prop :=
-  match Δ₁.edgeDef? a, Δ₂.edgeDef? b with
-  | some d₁, some d₂ =>
-    SetEq d₁.types d₂.types ∧ SetEq d₁.sourceRequirements d₂.sourceRequirements ∧
-      SetEq d₁.targetRequirements d₂.targetRequirements ∧
-      d₁.packageContract = d₂.packageContract ∧ SetEq d₁.tags d₂.tags ∧
-      d₁.authorityMatch = d₂.authorityMatch
-  | _, _ => False
-
-instance (Δ₁ : Definition) (a : EdgeId) (Δ₂ : Definition) (b : EdgeId) :
-    Decidable (SameEdge Δ₁ a Δ₂ b) := by
-  unfold SameEdge; split <;> infer_instance
-
-/-- An annotated graph fragment whose identifiers are rule-local symbols. -/
+/-- An annotated graph fragment: the six graph fields of a definition, without its schema and
+contracts. -/
 structure Fragment where
   nodes : List NodeId
   edges : List Edge
@@ -121,42 +73,50 @@ structure Fragment where
   roots : List RootRule
   deriving DecidableEq, Repr
 
-/-- The fragment as a complete definition under `Δ`'s schema and contracts. -/
-def Fragment.under (F : Fragment) (Δ : Definition) : Definition :=
-  { schema := Δ.schema, contracts := Δ.contracts, nodes := F.nodes, edges := F.edges,
-    nodeDefs := F.nodeDefs, edgeDefs := F.edgeDefs, transitions := F.transitions,
-    roots := F.roots }
+/-- Who asks for a rewrite. The host names principals; the law never interprets one, and only
+the policy reads it. -/
+abbrev Principal := String
 
-/-- A production `L ← K → R`, with `K` given by its node and edge symbols. -/
-structure Production where
-  id : String
-  left : Fragment
-  interfaceNodes : List NodeId
-  interfaceEdges : List EdgeId
-  right : Fragment
+/-- An explicit graph edit (§5): the current nodes and edges it removes, and the fragment it
+adds. The fragment names the identities it allocates, and its edges may end at surviving
+nodes as well as added ones. -/
+structure Edit where
+  removeNodes : List NodeId
+  removeEdges : List EdgeId
+  add : Fragment
   deriving DecidableEq, Repr
 
-/-- A match: `L`'s symbols bound to current identities, and `R ∖ K`'s to fresh ones. -/
-structure Match where
-  nodes : List (NodeId × NodeId)
-  edges : List (EdgeId × EdgeId)
-  freshNodes : List (NodeId × NodeId)
-  freshEdges : List (EdgeId × EdgeId)
-  deriving DecidableEq, Repr
-
+/-- A rewrite request: an edit, and the principal asking for it. -/
 structure RewriteRequest where
-  production : String
-  matching : Match
+  principal : Principal
+  edit : Edit
   deriving DecidableEq, Repr
 
-/-- `m` binds exactly the symbols `expected`, injectively, to nonempty identities. -/
-def ExactBindings (m : List (String × String)) (expected : List String) : Prop :=
-  (m.map Prod.fst).Nodup ∧ SetEq (m.map Prod.fst) expected ∧ (m.map Prod.snd).Nodup ∧
-    ∀ x ∈ m.map Prod.snd, x ≠ ""
+namespace Edit
 
-instance (m : List (String × String)) (expected : List String) :
-    Decidable (ExactBindings m expected) := by
-  unfold ExactBindings; infer_instance
+/-- `Δ` without what `e` removes, plus what `e` adds. Removing a node removes its definition,
+transition rules, and root rule; removing an edge removes its annotation. -/
+def apply (e : Edit) (Δ : Definition) : Definition :=
+  { Δ with
+    nodes := Δ.nodes.filter (· ∉ e.removeNodes) ++ e.add.nodes
+    edges := Δ.edges.filter (·.id ∉ e.removeEdges) ++ e.add.edges
+    nodeDefs := Δ.nodeDefs.filter (·.node ∉ e.removeNodes) ++ e.add.nodeDefs
+    edgeDefs := Δ.edgeDefs.filter (·.edge ∉ e.removeEdges) ++ e.add.edgeDefs
+    transitions := Δ.transitions.filter (·.node ∉ e.removeNodes) ++ e.add.transitions
+    roots := Δ.roots.filter (·.node ∉ e.removeNodes) ++ e.add.roots }
+
+/-- `e` defines only what it adds: every node definition, transition rule, and root rule it
+carries belongs to an added node, and every edge annotation to an added edge. A surviving
+node or edge therefore keeps its own; changing one means replacing it. -/
+def DefinesOnlyAdded (e : Edit) : Prop :=
+  (∀ d ∈ e.add.nodeDefs, d.node ∈ e.add.nodes) ∧
+    (∀ d ∈ e.add.edgeDefs, d.edge ∈ e.add.edges.map (·.id)) ∧
+    (∀ r ∈ e.add.transitions, r.node ∈ e.add.nodes) ∧ ∀ r ∈ e.add.roots, r.node ∈ e.add.nodes
+
+instance (e : Edit) : Decidable e.DefinesOnlyAdded := by
+  unfold DefinesOnlyAdded; infer_instance
+
+end Edit
 
 /-- The admitted structural result of a rewrite. -/
 structure Replacement where
@@ -165,58 +125,23 @@ structure Replacement where
   freshNodes : List NodeId
   freshEdges : List Edge
 
-/-- The replacement definition for a match of `pr` in `Δ`, when the production is well
-shaped, the match is exact, the allocations are fresh, no deleted node keeps an edge, and the
-result is admitted (§5). -/
-def structural? (Δ : Definition) (S : State) (pr : Production) (m : Match) :
-    Option Replacement := do
-  let L := pr.left.under Δ
-  let R := pr.right.under Δ
-  -- The production: a nonempty identity, admitted sides, and a preserved interface.
-  guard (pr.id ≠ "")
-  guard L.Admitted
-  guard R.Admitted
-  guard (∀ k ∈ pr.interfaceNodes, k ∈ L.nodes ∧ k ∈ R.nodes)
-  guard (∀ k ∈ pr.interfaceEdges, ∃ a ∈ L.edges, a.id = k ∧ a ∈ R.edges ∧
-    a.source ∈ pr.interfaceNodes ∧ a.target ∈ pr.interfaceNodes)
-  guard (∀ k ∈ pr.interfaceNodes, SameNode L k R k)
-  guard (∀ k ∈ pr.interfaceEdges, SameEdge L k R k)
-  -- The match: exact, annotation-preserving bindings and unused fresh identities.
-  let newNodes := R.nodes.filter (· ∉ pr.interfaceNodes)
-  let newEdges := (R.edges.map (·.id)).filter (· ∉ pr.interfaceEdges)
-  guard (ExactBindings m.nodes L.nodes)
-  guard (ExactBindings m.edges (L.edges.map (·.id)))
-  guard (ExactBindings m.freshNodes newNodes)
-  guard (ExactBindings m.freshEdges newEdges)
-  guard (∀ b ∈ m.nodes, SameNode L b.1 Δ b.2)
-  guard (∀ le ∈ L.edges, ∃ he ∈ Δ.edges, m.edges.lookup le.id = some he.id ∧
-    m.nodes.lookup le.source = some he.source ∧ m.nodes.lookup le.target = some he.target ∧
-    SameEdge L le.id Δ he.id)
-  guard (∀ b ∈ m.freshNodes, b.2 ∉ S.usedNodes)
-  guard (∀ b ∈ m.freshEdges, b.2 ∉ S.usedEdges)
-  -- Deletion: matched elements outside `K`, with no dangling edge.
-  let deleted := (m.nodes.filter (·.1 ∉ pr.interfaceNodes)).map (·.2)
-  let deletedEdges := (m.edges.filter (·.1 ∉ pr.interfaceEdges)).map (·.2)
-  guard (∀ e ∈ Δ.edges, (e.source ∈ deleted ∨ e.target ∈ deleted) → e.id ∈ deletedEdges)
-  -- The replacement: the current definition without the deleted part, plus `R ∖ K`.
-  let place (s : NodeId) : NodeId :=
-    (if s ∈ pr.interfaceNodes then m.nodes.lookup s else m.freshNodes.lookup s).getD s
-  let freshEdges := m.freshEdges.filterMap fun b =>
-    (R.edge? b.1).map fun re => ⟨b.2, place re.source, place re.target⟩
-  let next : Definition := { Δ with
-    nodes := Δ.nodes.filter (· ∉ deleted) ++ m.freshNodes.map (·.2)
-    edges := Δ.edges.filter (·.id ∉ deletedEdges) ++ freshEdges
-    nodeDefs := Δ.nodeDefs.filter (·.node ∉ deleted) ++
-      m.freshNodes.filterMap fun b => (R.nodeDef? b.1).map fun d => { d with node := b.2 }
-    edgeDefs := Δ.edgeDefs.filter (·.edge ∉ deletedEdges) ++
-      m.freshEdges.filterMap fun b => (R.edgeDef? b.1).map fun d => { d with edge := b.2 }
-    transitions := Δ.transitions.filter (·.node ∉ deleted) ++
-      m.freshNodes.flatMap fun b =>
-        (R.transitions.filter (·.node == b.1)).map fun r => { r with node := b.2 }
-    roots := Δ.roots.filter (·.node ∉ deleted) ++
-      m.freshNodes.filterMap fun b => (R.ceiling? b.1).map fun c => ⟨b.2, c⟩ }
-  guard next.Admitted
-  pure ⟨next, deleted, m.freshNodes.map (·.2), freshEdges⟩
+/-- The replacement an edit `e` makes of `Δ` in state `S` (§5): it removes distinct current
+nodes and edges and leaves no edge dangling, allocates only identities `S` has never used,
+defines only what it adds, and yields an admitted definition. Admission also makes the
+allocated identities distinct and nonempty. -/
+def structuralEdit? (Δ : Definition) (S : State) (e : Edit) : Option Replacement := do
+  -- Removal: distinct current nodes and edges, including every edge at a removed node.
+  guard (e.removeNodes.Nodup ∧ ∀ v ∈ e.removeNodes, v ∈ Δ.nodes)
+  guard (e.removeEdges.Nodup ∧ ∀ x ∈ e.removeEdges, x ∈ Δ.edges.map (·.id))
+  guard (∀ ed ∈ Δ.edges,
+    (ed.source ∈ e.removeNodes ∨ ed.target ∈ e.removeNodes) → ed.id ∈ e.removeEdges)
+  -- Addition: identities never used, defining only what is added.
+  guard (∀ v ∈ e.add.nodes, v ∉ S.usedNodes)
+  guard (∀ ed ∈ e.add.edges, ed.id ∉ S.usedEdges)
+  guard e.DefinesOnlyAdded
+  -- The result.
+  guard (e.apply Δ).Admitted
+  pure ⟨e.apply Δ, e.removeNodes, e.add.nodes, e.add.edges⟩
 
 /-- Edge `e` of `Δ` accepts `r` on metadata: its contract's object type and its authority
 condition. -/
@@ -232,6 +157,11 @@ instance (Δ : Definition) (e : Edge) (r : PackageRecord) : Decidable (Δ.Metada
   unfold Definition.MetadataAccepts; split
   · split <;> infer_instance
   · infer_instance
+
+/-- A rewrite policy: whether a principal may take `Δ` to `next` by an edit that retires the
+listed packages. It is trusted, like the validators: the law takes it as a parameter, and every
+theorem holds for every policy. -/
+abbrev Policy := Principal → Definition → Edit → Definition → List (PackageId × Reason) → Bool
 
 section Rules
 
@@ -266,13 +196,12 @@ def cleanup? (Δ next : Definition) (deleted : List NodeId) (evidence : List (Di
         | .all =>
           if d.edge ∈ next.incoming r.holder then some none else some (some .routeRemoved)
 
-/-- A rewrite (§5): the registered production's admitted replacement, with every live package
-kept or retired by the cleanup table, all at the successor revision. -/
-def rewrite (grammar : List Production) (Δ : Definition) (S : State) (req : RewriteRequest)
+/-- A rewrite (§5): the edit's admitted replacement, with every live package kept or retired by
+the cleanup table, all at the successor revision, provided the policy permits the principal
+the edit and the retirements it makes. -/
+def rewrite (permits : Policy) (Δ : Definition) (S : State) (req : RewriteRequest)
     (evidence : List (Digest × Bytes)) : Option (Definition × State) := do
-  guard (grammar.map (·.id)).Nodup
-  let pr ← grammar.find? (·.id == req.production)
-  let rep ← structural? Δ S pr req.matching
+  let rep ← structuralEdit? Δ S req.edit
   let fates ← S.packageIds.mapM fun p =>
     match S.packages p with
     | some r =>
@@ -281,6 +210,7 @@ def rewrite (grammar : List Production) (Δ : Definition) (S : State) (req : Rew
       else some (p, none)
     | none => some (p, none)
   let retired := fates.filterMap fun f => f.2.map ((f.1, ·))
+  guard (permits req.principal Δ req.edit rep.next retired)
   pure (rep.next, { S with
     packages := fun q =>
       match retired.lookup q with

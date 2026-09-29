@@ -16,7 +16,7 @@ package. An extension changes no record.
 namespace Ontography.Proofs
 
 variable {accepts : ContractId → Bytes → Bool} {H : Bytes → Digest}
-  {grammar : List Production} {Δ Δ' : Definition} {S S' : State}
+  {permits : Policy} {Δ Δ' : Definition} {S S' : State}
 
 namespace Delivery
 
@@ -52,7 +52,7 @@ end Delivery
 /-- I3 at the time of delivery: a transition keeps every delivery already made and makes new
 ones only over an edge of the definition it applies to, from the producer's node to the
 receiver. -/
-theorem sysStep_delivery {op : SysOp} (h : sysStep accepts H grammar Δ S op = some (Δ', S'))
+theorem sysStep_delivery {op : SysOp} (h : sysStep accepts H permits Δ S op = some (Δ', S'))
     {p : PackageId} {r' : PackageRecord} {d : Delivery} (hr' : S'.packages p = some r')
     (hd : r'.delivery = some d) :
     (∃ r, S.packages p = some r ∧ r.delivery = some d) ∨
@@ -96,7 +96,7 @@ theorem sysStep_delivery {op : SysOp} (h : sysStep accepts H grammar Δ S op = s
       · exact .inl ⟨r', hr', hd⟩
   | rewrite req evidence =>
     -- A rewrite records no new package and changes a recorded one at most by retiring it.
-    obtain ⟨-, -, -, -, -, hpkg, -⟩ := Sys.rewrite_eq_some h
+    obtain ⟨-, -, -, -, hpkg, -⟩ := Sys.rewrite_eq_some h
     cases hr : S.packages p with
     | none =>
       rw [Runs.rewrite_absent h hr] at hr'

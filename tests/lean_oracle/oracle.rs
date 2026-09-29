@@ -10,7 +10,7 @@ use std::process::{Command, Stdio};
 use ontography::{ContentDigest, PackageId};
 use serde_json::{Value, json};
 
-use crate::format::{FORMAT, Trace, TraceOp, TriggerSpec, parse_package, unhex};
+use crate::format::{FORMAT, Trace, TraceOp, TriggerSpec, distinct, parse_package, unhex};
 use crate::run::{Identity, Run, verdict};
 
 /// At most this many differing state paths are reported for one step.
@@ -291,22 +291,29 @@ pub fn replay_in_kernel(file: &Trace) -> Run {
         file.name.clone(),
         file.seed,
         file.definition.clone(),
-        file.grammar.clone(),
         file.validators.clone(),
     );
     for (step, op) in file.ops.iter().enumerate() {
-        if let TraceOp::Activate {
-            trigger: TriggerSpec::Pkgs(inputs),
-            ..
-        } = op
-        {
-            let distinct: BTreeSet<PackageId> = inputs.iter().map(parse_package).collect();
-            assert_eq!(
-                distinct.len(),
-                inputs.len(),
-                "{}: step {step} repeats an input; a trigger names a set",
+        match op {
+            TraceOp::Activate {
+                trigger: TriggerSpec::Pkgs(inputs),
+                ..
+            } => {
+                let inputs_distinct: BTreeSet<PackageId> =
+                    inputs.iter().map(parse_package).collect();
+                assert_eq!(
+                    inputs_distinct.len(),
+                    inputs.len(),
+                    "{}: step {step} repeats an input; a trigger names a set",
+                    file.name
+                );
+            }
+            TraceOp::Rewrite { edit, .. } => assert!(
+                distinct(&edit.remove_nodes) && distinct(&edit.remove_edges),
+                "{}: step {step} repeats a removal; an edit removes a set",
                 file.name
-            );
+            ),
+            _ => {}
         }
         let accepted = run.record(op.clone(), Identity::Recorded);
         if let Some(expect) = op.expect() {

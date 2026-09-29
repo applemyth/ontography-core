@@ -1,22 +1,29 @@
-//! Behavioral checks for the node-held package calculus and admitted rewrites,
-//! ported from the sibling application suite and re-targeted to this crate's
-//! local cleanup rule: an `Out` package is rechecked only when its holder's
-//! outgoing edge identity set changed; an `In` receipt at an `All` receiver is
-//! retired only when its delivery edge left the incoming set.
+//! Behavioral checks for the node-held package calculus and admitted graph
+//! edits, ported from the sibling application suite and re-targeted to this
+//! crate's local cleanup rule: an `Out` package is rechecked only when its
+//! holder's outgoing edge identity set changed; an `In` receipt at an `All`
+//! receiver is retired only when its delivery edge left the incoming set.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
 
 use ontography::{
-    ActivationProposal, IngressMode, Kernel, Phase, Reject, RetirementReason, RewriteError,
-    RewriteFragment, RewriteGrammar, RewriteMatch, RewriteProduction, RewriteRequest,
-    StateRestoreError, TransferError,
+    ActivationProposal, Authority, AuthorityTransitionRule, DenyAll, Edge, EdgeDefinition,
+    EditContext, GraphEdit, GraphFragment, IngressMode, Kernel, Node, NodeDefinition, PackageId,
+    PermitAll, Phase, PolicyDenial, Principal, Reject, RetirementReason, RewriteError,
+    RewriteRequest, RootRule, StateRestoreError, TransferError,
 };
 
 mod support;
 use support::{
-    authority, bindings, delivered, evidence, kernel, names, normalization, outbound, payload, rule,
+    authority, delivered, evidence, kernel, names, normalization, outbound, payload, replace,
+    request, tag,
 };
+
+/// An edit that only adds `fragment`.
+fn add(fragment: GraphFragment) -> GraphEdit {
+    GraphEdit::new(BTreeSet::new(), BTreeSet::new(), fragment)
+}
 
 #[test]
 fn atomic_subdivision_preserves_outbound_and_delivered_context_without_transfer() {
@@ -26,8 +33,7 @@ fn atomic_subdivision_preserves_outbound_and_delivered_context_without_transfer(
         &["A", "B", "C"],
         &[("ac", "A", "C", "payload"), ("cb", "C", "B", "payload")],
     );
-    let (production, request) = rule("subdivide", &left, &right, &["A", "B"], &[]);
-    let grammar = RewriteGrammar::new([production]).unwrap();
+    let subdivide = request(replace(&left, &right, &["A", "B"], &[]));
     let mut state = initial.empty_state();
     let out = outbound(&initial, &mut state, "A");
     let received = delivered(&initial, &mut state, "ab");
@@ -35,7 +41,7 @@ fn atomic_subdivision_preserves_outbound_and_delivered_context_without_transfer(
     let before_history = state.activations().clone();
     let before_packages = state.packages().clone();
     let prepared = initial
-        .prepare_rewrite(&state, &grammar, &request, &evidence())
+        .prepare_rewrite(&state, &PermitAll, &subdivide, &evidence())
         .unwrap();
     // local cleanup: U's out-edges are unchanged, so its unroutable package is
     // not rechecked; A's out-edges changed and the fresh `ac` accepts `out`.
@@ -130,12 +136,11 @@ fn ordinary_rejection_retires_but_missing_evidence_and_panics_abort_preparation(
         let package = outbound(&initial, &mut state, "A");
         let before = state.clone();
 
-        // local cleanup: an identity rewrite (L = K = R) changes no holder's
-        // out-edges, so it retires nothing and never requests evidence, even
-        // when the only route would deny or panic.
-        let (identity, normalize) = normalization();
+        // local cleanup: the empty edit changes no holder's out-edges, so it
+        // retires nothing and never requests evidence, even when the only
+        // route would deny or panic.
         let untouched = initial
-            .prepare_rewrite_with_evidence(&state, &identity, &normalize, |_, _| {
+            .prepare_rewrite_with_evidence(&state, &PermitAll, &normalization(), |_, _| {
                 panic!("identity rewrite demanded bytes")
             })
             .unwrap();
@@ -143,9 +148,8 @@ fn ordinary_rejection_retires_but_missing_evidence_and_panics_abort_preparation(
 
         // Replacing A's only route changes its out-edge set, so `package` is
         // rechecked against the fresh edge under the same contract.
-        let (production, request) = rule("replace", &initial, &replaced, &["A", "B"], &[]);
-        let grammar = RewriteGrammar::new([production]).unwrap();
-        let missing = initial.prepare_rewrite(&state, &grammar, &request, &BTreeMap::new());
+        let swap = request(replace(&initial, &replaced, &["A", "B"], &[]));
+        let missing = initial.prepare_rewrite(&state, &PermitAll, &swap, &BTreeMap::new());
         if matches!(contract, "other" | "unauthorized") {
             assert_eq!(
                 missing.unwrap().retirements().get(&package),
@@ -154,7 +158,7 @@ fn ordinary_rejection_retires_but_missing_evidence_and_panics_abort_preparation(
         } else {
             assert!(matches!(missing, Err(RewriteError::MissingEvidence(_))));
         }
-        let result = initial.prepare_rewrite(&state, &grammar, &request, &evidence());
+        let result = initial.prepare_rewrite(&state, &PermitAll, &swap, &evidence());
         match contract {
             "payload" => assert!(result.unwrap().retirements().is_empty()),
             "panic" => assert!(matches!(result, Err(RewriteError::ValidatorPanicked(_)))),
@@ -171,14 +175,13 @@ fn ordinary_rejection_retires_but_missing_evidence_and_panics_abort_preparation(
 fn deletion_retires_both_phases_and_identity_cannot_be_reused() {
     let initial = kernel(&["A", "B"], &[("ab", "A", "B", "payload")]);
     let after = kernel(&["A"], &[]);
-    let (remove, request) = rule("remove-b", &initial, &after, &["A"], &[]);
-    let (recreate, recreate_request) = rule("recreate-b", &after, &initial, &["A"], &[]);
-    let grammar = RewriteGrammar::new([remove, recreate]).unwrap();
+    let remove_b = request(replace(&initial, &after, &["A"], &[]));
+    let recreate_b = request(replace(&after, &initial, &["A"], &[]));
     let mut state = initial.empty_state();
     let inbound = delivered(&initial, &mut state, "ab");
     let outbound_b = outbound(&initial, &mut state, "B");
     let prepared = initial
-        .prepare_rewrite(&state, &grammar, &request, &BTreeMap::new())
+        .prepare_rewrite(&state, &PermitAll, &remove_b, &BTreeMap::new())
         .unwrap();
     assert_eq!(
         prepared.retirements(),
@@ -188,9 +191,10 @@ fn deletion_retires_both_phases_and_identity_cannot_be_reused() {
         ])
     );
     let next = initial.commit_rewrite(&mut state, prepared).unwrap();
+    // B and ab are lifetime identities now, so an edit cannot add them again.
     assert!(matches!(
-        next.prepare_rewrite(&state, &grammar, &recreate_request, &evidence()),
-        Err(RewriteError::InvalidMatch(_))
+        next.prepare_rewrite(&state, &PermitAll, &recreate_b, &evidence()),
+        Err(RewriteError::InvalidEdit(_))
     ));
     assert!(
         next.activate(
@@ -213,50 +217,69 @@ fn deletion_retires_both_phases_and_identity_cannot_be_reused() {
 }
 
 #[test]
-fn dangling_context_and_changed_preserved_policy_are_rejected() {
+fn dangling_edges_and_survivor_annotations_are_rejected() {
     let initial = kernel(
         &["A", "B", "U"],
         &[("ab", "A", "B", "payload"), ("ub", "U", "B", "payload")],
     );
+    let state = initial.empty_state();
     let left = kernel(&["A", "B"], &[("ab", "A", "B", "payload")]);
     let right = kernel(&["A"], &[]);
-    let (remove, request) = rule("dangling", &left, &right, &["A"], &[]);
-    let grammar = RewriteGrammar::new([remove]).unwrap();
+    // Removing B while `ub` survives would leave `ub` without a target.
+    let dangling = request(replace(&left, &right, &["A"], &[]));
     assert!(matches!(
-        initial.prepare_rewrite(&initial.empty_state(), &grammar, &request, &evidence()),
-        Err(RewriteError::InvalidMatch(_))
+        initial.prepare_rewrite(&state, &PermitAll, &dangling, &evidence()),
+        Err(RewriteError::InvalidEdit(_))
     ));
 
-    let changed = RewriteFragment::new(
-        right.graph().nodes().to_vec(),
-        right.graph().edges().to_vec(),
-        right.node_definitions().to_vec(),
-        right.edge_definitions().to_vec(),
-        right.authority_transitions().to_vec(),
-        vec![],
-    );
-    let preserve = RewriteProduction::new(
-        "policy",
-        RewriteFragment::from_kernel(&right),
-        names(&["A"]),
-        names(&[]),
-        changed,
-    )
-    .unwrap();
-    let request = RewriteRequest::new(
-        "policy",
-        RewriteMatch::new(
-            bindings(&["A"]),
-            bindings(&[]),
-            bindings(&[]),
-            bindings(&[]),
+    // A surviving node or edge keeps its definition, root rule, and
+    // transitions; an edit may annotate only what it adds.
+    let annotations = [
+        GraphFragment::new(
+            vec![],
+            vec![],
+            vec![NodeDefinition::new("A", ["n"], "result").unwrap()],
+            vec![],
+            vec![],
+            vec![],
         ),
-    );
-    let grammar = RewriteGrammar::new([preserve]).unwrap();
-    assert!(matches!(
-        right.prepare_rewrite(&right.empty_state(), &grammar, &request, &evidence()),
-        Err(RewriteError::InvalidProduction(_))
-    ));
+        GraphFragment::new(
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![RootRule::new("A", Authority::new([tag("other")])).unwrap()],
+        ),
+        GraphFragment::new(
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![
+                AuthorityTransitionRule::new("A", authority(), Authority::new([tag("other")]))
+                    .unwrap(),
+            ],
+            vec![],
+        ),
+        GraphFragment::new(
+            vec![],
+            vec![],
+            vec![],
+            vec![
+                EdgeDefinition::new("ab", ["flow"], ["n"], ["n"], "payload", [tag("other")])
+                    .unwrap(),
+            ],
+            vec![],
+            vec![],
+        ),
+    ];
+    for annotation in annotations {
+        assert!(matches!(
+            initial.prepare_rewrite(&state, &PermitAll, &request(add(annotation)), &evidence()),
+            Err(RewriteError::InvalidEdit(_))
+        ));
+    }
 }
 
 #[test]
@@ -264,9 +287,9 @@ fn equal_revision_divergence_and_transfer_make_plans_stale_without_mutation() {
     let initial = kernel(&["A", "B"], &[("ab", "A", "B", "payload")]);
     let mut state = initial.empty_state();
     let package = outbound(&initial, &mut state, "A");
-    let (grammar, request) = normalization();
+    let identity = normalization();
     let rewrite = initial
-        .prepare_rewrite(&state, &grammar, &request, &evidence())
+        .prepare_rewrite(&state, &PermitAll, &identity, &evidence())
         .unwrap();
     let transfer = initial
         .prepare_transfer(&state, package, "ab", &payload())
@@ -285,7 +308,7 @@ fn equal_revision_divergence_and_transfer_make_plans_stale_without_mutation() {
     outbound(&initial, &mut two, "B");
     assert_eq!(one.revision(), two.revision());
     let plan = initial
-        .prepare_rewrite(&one, &grammar, &request, &evidence())
+        .prepare_rewrite(&one, &PermitAll, &identity, &evidence())
         .unwrap();
     let before = two.clone();
     assert!(matches!(
@@ -323,10 +346,9 @@ fn delivered_retention_does_not_change_topology_relative_all() {
     let mut state = initial.empty_state();
     let received = delivered(&initial, &mut state, "ab");
     let right = with_ingress(kernel(&["A", "B"], &[]), IngressMode::All);
-    let (production, request) = rule("disconnect", &initial, &right, &["A", "B"], &[]);
-    let grammar = RewriteGrammar::new([production]).unwrap();
+    let disconnect = request(replace(&initial, &right, &["A", "B"], &[]));
     let prepared = initial
-        .prepare_rewrite(&state, &grammar, &request, &BTreeMap::new())
+        .prepare_rewrite(&state, &PermitAll, &disconnect, &BTreeMap::new())
         .unwrap();
     // local cleanup: `ab` left the incoming set of the surviving `All`
     // receiver B, so its receipt is retired as RouteRemoved without evidence.
@@ -360,10 +382,9 @@ fn delivered_retention_does_not_change_topology_relative_all() {
     let mut state = initial.empty_state();
     let received = delivered(&initial, &mut state, "ab");
     let right = with_ingress(kernel(&["A", "B"], &[]), IngressMode::Any);
-    let (production, request) = rule("disconnect", &initial, &right, &["A", "B"], &[]);
-    let grammar = RewriteGrammar::new([production]).unwrap();
+    let disconnect = request(replace(&initial, &right, &["A", "B"], &[]));
     let prepared = initial
-        .prepare_rewrite(&state, &grammar, &request, &BTreeMap::new())
+        .prepare_rewrite(&state, &PermitAll, &disconnect, &BTreeMap::new())
         .unwrap();
     assert!(prepared.retirements().is_empty());
     let next = initial.commit_rewrite(&mut state, prepared).unwrap();
@@ -392,11 +413,10 @@ fn evidence_is_requested_only_after_live_custody_and_edge_metadata_require_it() 
     let mut state = initial.empty_state();
     let package = outbound(&initial, &mut state, "A");
 
-    // local cleanup: an identity rewrite leaves A's out-edges unchanged, so the
+    // local cleanup: the empty edit leaves A's out-edges unchanged, so the
     // unroutable package is neither rechecked nor retired, and no bytes are read.
-    let (identity, normalize) = normalization();
     let untouched = initial
-        .prepare_rewrite_with_evidence(&state, &identity, &normalize, |_, _| {
+        .prepare_rewrite_with_evidence(&state, &PermitAll, &normalization(), |_, _| {
             panic!("unchanged holder demanded bytes")
         })
         .unwrap();
@@ -404,10 +424,9 @@ fn evidence_is_requested_only_after_live_custody_and_edge_metadata_require_it() 
 
     // Replacing both routes changes A's out-edge set; every fresh edge rejects
     // the package on type or authority metadata, so no bytes are requested.
-    let (production, request) = rule("replace", &initial, &replaced, &["A", "B"], &[]);
-    let grammar = RewriteGrammar::new([production]).unwrap();
+    let swap = request(replace(&initial, &replaced, &["A", "B"], &[]));
     let prepared = initial
-        .prepare_rewrite_with_evidence(&state, &grammar, &request, |_, _| {
+        .prepare_rewrite_with_evidence(&state, &PermitAll, &swap, |_, _| {
             panic!("metadata-rejected edge demanded bytes")
         })
         .unwrap();
@@ -431,90 +450,211 @@ fn evidence_is_requested_only_after_live_custody_and_edge_metadata_require_it() 
 }
 
 #[test]
-fn rule_symbols_match_injectively_and_fresh_allocations_are_not_survivor_assertions() {
+fn edits_remove_existing_identities_and_add_only_fresh_ones() {
     let initial = kernel(&["A", "B"], &[("ab", "A", "B", "payload")]);
-    let left = kernel(&["X", "Y"], &[("xy", "X", "Y", "payload")]);
+    let left = kernel(&["A", "B"], &[("ab", "A", "B", "payload")]);
     let right = kernel(
-        &["X", "Y", "Z"],
-        &[("xz", "X", "Z", "payload"), ("zy", "Z", "Y", "payload")],
-    );
-    let production = RewriteProduction::new(
-        "symbols",
-        RewriteFragment::from_kernel(&left),
-        names(&["X", "Y"]),
-        names(&[]),
-        RewriteFragment::from_kernel(&right),
-    )
-    .unwrap();
-    let grammar = RewriteGrammar::new([production]).unwrap();
-    let correct = RewriteMatch::new(
-        BTreeMap::from([
-            (Arc::from("X"), Arc::from("A")),
-            (Arc::from("Y"), Arc::from("B")),
-        ]),
-        BTreeMap::from([(Arc::from("xy"), Arc::from("ab"))]),
-        BTreeMap::from([(Arc::from("Z"), Arc::from("C"))]),
-        BTreeMap::from([
-            (Arc::from("xz"), Arc::from("ac")),
-            (Arc::from("zy"), Arc::from("cb")),
-        ]),
+        &["A", "B", "C"],
+        &[("ac", "A", "C", "payload"), ("cb", "C", "B", "payload")],
     );
     let state = initial.empty_state();
+    let subdivide = replace(&left, &right, &["A", "B"], &[]);
     let prepared = initial
         .prepare_rewrite(
             &state,
-            &grammar,
-            &RewriteRequest::new("symbols", correct.clone()),
+            &PermitAll,
+            &request(subdivide.clone()),
             &BTreeMap::new(),
         )
         .unwrap();
-    assert!(prepared.next_kernel().graph().node("C").is_some());
-    assert!(prepared.next_kernel().graph().node("Z").is_none());
-    for corrupt in ["missing", "noninjective", "reuse"] {
-        let mut nodes = BTreeMap::from([
-            (Arc::from("X"), Arc::from("A")),
-            (Arc::from("Y"), Arc::from("B")),
-        ]);
-        let mut fresh_nodes = BTreeMap::from([(Arc::from("Z"), Arc::from("C"))]);
-        match corrupt {
-            "missing" => {
-                nodes.remove("Y");
-            }
-            "noninjective" => {
-                nodes.insert(Arc::from("Y"), Arc::from("A"));
-            }
-            _ => {
-                fresh_nodes.insert(Arc::from("Z"), Arc::from("B"));
-            }
-        }
-        let matching = RewriteMatch::new(
-            nodes,
-            BTreeMap::from([(Arc::from("xy"), Arc::from("ab"))]),
-            fresh_nodes,
-            BTreeMap::from([
-                (Arc::from("xz"), Arc::from("ac")),
-                (Arc::from("zy"), Arc::from("cb")),
-            ]),
-        );
+    let next = prepared.next_kernel().graph();
+    assert!(next.node("C").is_some());
+    assert!(next.edge("ab").is_none());
+    assert_eq!(
+        (
+            next.edge("ac").unwrap().source(),
+            next.edge("cb").unwrap().target()
+        ),
+        ("A", "B")
+    );
+
+    let with = |remove_nodes: &[&str], remove_edges: &[&str], add: &GraphFragment| {
+        request(GraphEdit::new(
+            names(remove_nodes),
+            names(remove_edges),
+            add.clone(),
+        ))
+    };
+    let node_c = |id: &str| {
+        GraphFragment::new(
+            vec![Node::new(id).unwrap()],
+            vec![],
+            vec![NodeDefinition::new(id, ["n"], "result").unwrap()],
+            vec![],
+            vec![],
+            vec![],
+        )
+    };
+    let edge = |id: &str| {
+        GraphFragment::new(
+            vec![],
+            vec![Edge::new(id, "A", "B").unwrap()],
+            vec![],
+            vec![EdgeDefinition::new(id, ["flow"], ["n"], ["n"], "payload", [tag("run")]).unwrap()],
+            vec![],
+            vec![],
+        )
+    };
+    let empty = GraphFragment::default();
+    let invalid = [
+        // Removed elements must exist.
+        with(&["Z"], &[], &empty),
+        with(&[], &["zz"], &empty),
+        // Added elements must be fresh for the workflow's lifetime: a live
+        // node, a live edge, and an edge removed by the same edit all reuse.
+        with(&[], &[], &node_c("B")),
+        with(&[], &[], &edge("ab")),
+        with(&[], &["ab"], &edge("ab")),
+    ];
+    for request in invalid {
         assert!(matches!(
-            initial.prepare_rewrite(
-                &state,
-                &grammar,
-                &RewriteRequest::new("symbols", matching),
-                &BTreeMap::new()
-            ),
-            Err(RewriteError::InvalidMatch(_))
+            initial.prepare_rewrite(&state, &PermitAll, &request, &BTreeMap::new()),
+            Err(RewriteError::InvalidEdit(_))
         ));
     }
+    // A fragment naming one fresh node twice fails ordinary admission.
+    let duplicated = GraphFragment::new(
+        vec![Node::new("C").unwrap(), Node::new("C").unwrap()],
+        vec![],
+        vec![NodeDefinition::new("C", ["n"], "result").unwrap()],
+        vec![],
+        vec![],
+        vec![],
+    );
     assert!(matches!(
         initial.prepare_rewrite(
             &state,
-            &RewriteGrammar::default(),
-            &RewriteRequest::new("symbols", correct),
+            &PermitAll,
+            &with(&[], &[], &duplicated),
             &BTreeMap::new()
         ),
-        Err(RewriteError::UnknownProduction(_))
+        Err(RewriteError::Definition(_))
     ));
+    // An added node without a definition fails admission too.
+    let undefined = GraphFragment::new(
+        vec![Node::new("C").unwrap()],
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+    );
+    assert!(matches!(
+        initial.prepare_rewrite(
+            &state,
+            &PermitAll,
+            &with(&[], &[], &undefined),
+            &BTreeMap::new()
+        ),
+        Err(RewriteError::Definition(_))
+    ));
+    assert_eq!(state, initial.empty_state());
+}
+
+/// What a recording policy saw: principal, whether B exists before and after,
+/// and the retirements.
+type Seen = (String, bool, bool, BTreeMap<PackageId, RetirementReason>);
+
+#[test]
+fn the_policy_decides_after_admission_and_a_refusal_changes_nothing() {
+    let initial = kernel(&["A", "B"], &[("ab", "A", "B", "payload")]);
+    let after = kernel(&["A"], &[]);
+    let remove_b = replace(&initial, &after, &["A"], &[]);
+    let mut state = initial.empty_state();
+    let received = delivered(&initial, &mut state, "ab");
+    let before = state.clone();
+
+    // Every default refuses: a runtime or application without a policy
+    // accepts no graph edits.
+    assert!(matches!(
+        initial.prepare_rewrite(
+            &state,
+            &DenyAll,
+            &request(remove_b.clone()),
+            &BTreeMap::new()
+        ),
+        Err(RewriteError::Denied(_))
+    ));
+
+    // The policy sees the principal, both definitions, the edit, and the
+    // exact retirements, and may refuse with its own reason.
+    let seen: Mutex<Vec<Seen>> = Mutex::new(Vec::new());
+    let observe = |context: &EditContext<'_>| {
+        seen.lock().unwrap().push((
+            context.principal.name().to_owned(),
+            context.before.graph().node("B").is_some(),
+            context.after.graph().node("B").is_some(),
+            context.retirements.clone(),
+        ));
+        if context.principal.name() == "intruder" {
+            Err(PolicyDenial::new("intruders may not remove nodes"))
+        } else {
+            Ok(())
+        }
+    };
+    let as_intruder = RewriteRequest::new(Principal::new("intruder"), remove_b.clone());
+    assert!(matches!(
+        initial.prepare_rewrite(&state, &observe, &as_intruder, &BTreeMap::new()),
+        Err(RewriteError::Denied(reason)) if &*reason == "intruders may not remove nodes"
+    ));
+    let prepared = initial
+        .prepare_rewrite(
+            &state,
+            &observe,
+            &request(remove_b.clone()),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+    let expected = BTreeMap::from([(received, RetirementReason::HolderRemoved)]);
+    assert_eq!(prepared.retirements(), expected);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            ("intruder".to_owned(), true, false, expected.clone()),
+            ("test".to_owned(), true, false, expected),
+        ]
+    );
+
+    // Structure is checked first: an invalid edit is invalid whatever the
+    // policy would say, and the policy is not consulted.
+    let invalid = request(GraphEdit::new(
+        names(&["Z"]),
+        BTreeSet::new(),
+        GraphFragment::default(),
+    ));
+    assert!(matches!(
+        initial.prepare_rewrite(&state, &DenyAll, &invalid, &BTreeMap::new()),
+        Err(RewriteError::InvalidEdit(_))
+    ));
+    assert!(matches!(
+        initial.prepare_rewrite(&state, &observe, &invalid, &BTreeMap::new()),
+        Err(RewriteError::InvalidEdit(_))
+    ));
+    assert_eq!(seen.lock().unwrap().len(), 2);
+
+    // A panicking policy rejects the edit instead of unwinding.
+    let panicking = |_: &EditContext<'_>| -> Result<(), PolicyDenial> { panic!("policy fault") };
+    assert!(matches!(
+        initial.prepare_rewrite(&state, &panicking, &request(remove_b), &BTreeMap::new()),
+        Err(RewriteError::PolicyPanicked)
+    ));
+    assert_eq!(state, before);
+
+    initial.commit_rewrite(&mut state, prepared).unwrap();
+    assert_eq!(
+        state.retirement(received).unwrap().reason(),
+        RetirementReason::HolderRemoved
+    );
 }
 
 #[test]
@@ -528,13 +668,12 @@ fn cleanup_fetches_one_payload_per_package_across_candidate_edges() {
             ("c-accept", "A", "B", "payload"),
         ],
     );
-    let (production, request) = rule("connect", &initial, &after, &["A", "B"], &[]);
-    let grammar = RewriteGrammar::new([production]).unwrap();
+    let connect = request(replace(&initial, &after, &["A", "B"], &[]));
     let mut state = initial.empty_state();
     let package = outbound(&initial, &mut state, "A");
     let mut reads = 0;
     let plan = initial
-        .prepare_rewrite_with_evidence(&state, &grammar, &request, |id, _| {
+        .prepare_rewrite_with_evidence(&state, &PermitAll, &connect, |id, _| {
             assert_eq!(id, package);
             reads += 1;
             Ok(payload())
@@ -550,11 +689,8 @@ fn two_real_rewrites_commute_only_with_independent_holder_footprints() {
     let accepting = kernel(&["A", "B", "C", "D"], &[("ab", "A", "B", "payload")]);
     for (source, independent) in [("C", true), ("A", false)] {
         let rejecting = kernel(&["A", "B", "C", "D"], &[("reject", source, "D", "deny")]);
-        let (accept, accept_request) =
-            rule("accept", &initial, &accepting, &["A", "B", "C", "D"], &[]);
-        let (reject, reject_request) =
-            rule("reject", &initial, &rejecting, &["A", "B", "C", "D"], &[]);
-        let grammar = RewriteGrammar::new([accept, reject]).unwrap();
+        let accept = request(replace(&initial, &accepting, &["A", "B", "C", "D"], &[]));
+        let reject = request(replace(&initial, &rejecting, &["A", "B", "C", "D"], &[]));
         let mut seed = initial.empty_state();
         outbound(&initial, &mut seed, "A");
         outbound(&initial, &mut seed, "C");
@@ -563,7 +699,7 @@ fn two_real_rewrites_commute_only_with_independent_holder_footprints() {
             let mut state = seed.clone();
             for request in order {
                 let plan = current
-                    .prepare_rewrite(&state, &grammar, request, &evidence())
+                    .prepare_rewrite(&state, &PermitAll, request, &evidence())
                     .unwrap();
                 current = current.commit_rewrite(&mut state, plan).unwrap();
             }
@@ -574,8 +710,8 @@ fn two_real_rewrites_commute_only_with_independent_holder_footprints() {
                 .collect::<BTreeMap<_, _>>();
             (*current.fingerprint(), state.positions(), retired)
         };
-        let forward = run([&accept_request, &reject_request]);
-        let backward = run([&reject_request, &accept_request]);
+        let forward = run([&accept, &reject]);
+        let backward = run([&reject, &accept]);
         assert_eq!(forward.0, backward.0);
         if independent {
             assert_eq!(forward, backward);

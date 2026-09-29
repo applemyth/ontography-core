@@ -1,15 +1,15 @@
 //! Persistent-session probes: rewrite retirements, explicit retirement, and
 //! vocabulary extension survive a reopen with exact records.
 
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use ontography::{
     ActivationId, ActivationProposal, Authority, AuthorityTag, Contract, DefinitionId, Edge,
-    EdgeDefinition, Emission, ExtensionError, Graph, IngressMode, Kernel, Node, NodeDefinition,
-    OutputAuthority, PackageId, Phase, ProposalDecision, ProposalRuntime, Reject, RetireError,
-    RetirementReason, RewriteError, RewriteFragment, RewriteGrammar, RewriteMatch,
-    RewriteProduction, RewriteRequest, RootRule, Schema, SessionHandle,
+    EdgeDefinition, EditPolicy, Emission, ExtensionError, Graph, GraphEdit, GraphFragment,
+    IngressMode, Kernel, Node, NodeDefinition, OutputAuthority, PackageId, PermitAll, Phase,
+    Principal, ProposalDecision, ProposalRuntime, Reject, RetireError, RetirementReason,
+    RewriteError, RewriteRequest, RootRule, Schema, SessionHandle,
 };
 
 fn bytes(value: &'static [u8]) -> Arc<[u8]> {
@@ -64,39 +64,34 @@ fn admit(contracts: &Contracts, tags: &[&str], edges: &[(&str, &str)]) -> Kernel
     .unwrap()
 }
 
-fn production(
-    id: &str,
-    left: &Kernel,
-    right: &Kernel,
-    interface_edges: &[&str],
-) -> RewriteProduction {
-    RewriteProduction::new(
-        id,
-        RewriteFragment::from_kernel(left),
-        [Arc::from("a"), Arc::from("b")].into(),
-        interface_edges
-            .iter()
-            .map(|edge| Arc::from(*edge))
-            .collect(),
-        RewriteFragment::from_kernel(right),
-    )
-    .unwrap()
-}
-
-fn request(id: &str, edges: &[&str], fresh_edges: &[&str]) -> RewriteRequest {
-    let same = |values: &[&str]| -> BTreeMap<Arc<str>, Arc<str>> {
-        values
-            .iter()
-            .map(|value| (Arc::from(*value), Arc::from(*value)))
-            .collect()
-    };
+/// Removes the edges `removed` and adds the edges `added`, annotated as
+/// `source` defines them; `a` and `b` survive.
+fn swap_edges(removed: &[&str], source: &Kernel, added: &[&str]) -> RewriteRequest {
+    let added_edge = |id: &str| added.contains(&id);
     RewriteRequest::new(
-        id,
-        RewriteMatch::new(
-            same(&["a", "b"]),
-            same(edges),
-            BTreeMap::new(),
-            same(fresh_edges),
+        Principal::new("test"),
+        GraphEdit::new(
+            BTreeSet::new(),
+            removed.iter().map(|edge| Arc::from(*edge)).collect(),
+            GraphFragment::new(
+                vec![],
+                source
+                    .graph()
+                    .edges()
+                    .iter()
+                    .filter(|edge| added_edge(edge.id()))
+                    .cloned()
+                    .collect(),
+                vec![],
+                source
+                    .edge_definitions()
+                    .iter()
+                    .filter(|definition| added_edge(definition.edge_id()))
+                    .cloned()
+                    .collect(),
+                vec![],
+                vec![],
+            ),
         ),
     )
 }
@@ -138,15 +133,11 @@ async fn retirements_and_extension_survive_reopen() {
         &["route", "extra"],
         &[("e2", "route"), ("e3", "extra")],
     );
-    let grammar = RewriteGrammar::new([
-        production("replace", &with_e1, &with_e2, &[]),
-        production("tagged", &with_e2, &extended_with_e3, &["e2"]),
-    ])
-    .unwrap();
-    let replace = request("replace", &["e1"], &["e2"]);
-    let tagged = request("tagged", &["e2"], &["e3"]);
+    let policy: Arc<dyn EditPolicy> = Arc::new(PermitAll);
+    let replace = swap_edges(&["e1"], &with_e2, &["e2"]);
+    let tagged = swap_edges(&[], &extended_with_e3, &["e3"]);
 
-    let runtime = ProposalRuntime::with_grammar(Arc::clone(&with_e1), grammar.clone());
+    let runtime = ProposalRuntime::with_policy(Arc::clone(&with_e1), Arc::clone(&policy));
     let session = runtime.create_persistent(&run).unwrap();
 
     // A receipt on e1 at the All receiver, then e1 is replaced: RouteRemoved.
@@ -288,11 +279,11 @@ async fn retirements_and_extension_survive_reopen() {
 
     // Reopening requires the extended binding, and restores the exact records.
     assert!(
-        ProposalRuntime::with_grammar(Arc::clone(&with_e1), grammar.clone())
+        ProposalRuntime::with_policy(Arc::clone(&with_e1), Arc::clone(&policy))
             .open_persistent(&run)
             .is_err()
     );
-    let runtime = ProposalRuntime::with_grammar(Arc::clone(&extended), grammar);
+    let runtime = ProposalRuntime::with_policy(Arc::clone(&extended), policy);
     let session = runtime.open_persistent(&run).unwrap();
     let reopened = session.snapshot().await;
     assert_eq!(reopened.state(), &state);

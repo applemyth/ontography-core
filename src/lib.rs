@@ -1,8 +1,8 @@
 //! Ontography: authority-governed workflow occurrence graphs.
 //!
 //! Graph declarations compile into immutable kernel versions. The kernel checks
-//! activations, transfers, explicit retirements, interface-preserving graph
-//! rewrites with local frontier cleanup, and monotone vocabulary extensions.
+//! activations, transfers, explicit retirements, graph edits admitted under a
+//! trusted policy with local frontier cleanup, and monotone vocabulary extensions.
 //! Runtime sessions persist and serialize these actions together.
 //!
 //! This crate is the facade over the workspace crates: `ontography-calculus`,
@@ -49,13 +49,14 @@ pub use ontography_calculus::{
     Activation, ActivationId, ActivationProposal, ApplyError, Authority, AuthorityMatch,
     AuthorityTag, AuthorityTransitionRule, Binding, Checkpoint, CheckpointError, ContentDigest,
     Contract, ContractViolation, DefinitionError, DefinitionFingerprint, DefinitionId, Delivery,
-    Edge, EdgeDefinition, Emission, ExtensionError, FRAGMENT_ENCODING_VERSION, FragmentData,
-    FragmentDecodeError, FrontierView, Graph, IngressMode, Kernel, Node, NodeDefinition, Output,
-    OutputAuthority, PackageId, PackageRecord, PackageStatus, PackageView, Payload, Phase,
-    Position, PreparedExtension, PreparedRewrite, PreparedTransfer, Reject, RetireError,
-    Retirement, RetirementReason, RewriteError, RewriteFragment, RewriteGrammar, RewriteMatch,
-    RewriteProduction, RewriteRequest, RootRule, Schema, State, StateParts, StateRestoreError,
-    TransferError, TransferRejection, Transition, TransitionKind, Trigger, TriggerWitness,
+    DenyAll, Edge, EdgeDefinition, EditContext, EditPolicy, Emission, ExtensionError,
+    FRAGMENT_ENCODING_VERSION, FragmentData, FragmentDecodeError, FrontierView, Graph, GraphEdit,
+    GraphFragment, IngressMode, Kernel, Node, NodeDefinition, Output, OutputAuthority, PackageId,
+    PackageRecord, PackageStatus, PackageView, Payload, PermitAll, Phase, PolicyDenial, Position,
+    PreparedExtension, PreparedRewrite, PreparedTransfer, Principal, Reject, RetireError,
+    Retirement, RetirementReason, RewriteError, RewriteRequest, RootRule, Schema, State,
+    StateParts, StateRestoreError, TransferError, TransferRejection, Transition, TransitionKind,
+    Trigger, TriggerWitness,
 };
 pub use package::{
     PackageDocument, PackageEnvelope, PackageError, PackageLimits, PackageStore, ResolvedEntry,

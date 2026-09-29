@@ -1,14 +1,13 @@
 //! Run lifecycle at the application boundary: starts that fail after the run
 //! exists, and resumes of runs whose graph a rewrite changed.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use ontography::{
     Application, ApplicationBuilder, ApplicationContext, ApplicationRunMode, ApplicationStartError,
-    Authority, Contract, Graph, Kernel, Node, NodeComponent, NodeConfig, NodeDefinition, Payload,
-    RewriteFragment, RewriteGrammar, RewriteMatch, RewriteProduction, RewriteRequest,
-    SessionStatus,
+    Authority, Contract, Graph, GraphEdit, GraphFragment, Kernel, Node, NodeComponent, NodeConfig,
+    NodeDefinition, Payload, PermitAll, Principal, RewriteRequest, SessionStatus,
 };
 
 type Launches = Arc<Mutex<Vec<(String, ApplicationRunMode)>>>;
@@ -70,13 +69,6 @@ fn kernel_with(base: &Kernel, nodes: &[&str]) -> Kernel {
     .unwrap()
 }
 
-fn symbols(pairs: &[(&str, &str)]) -> BTreeMap<Arc<str>, Arc<str>> {
-    pairs
-        .iter()
-        .map(|(symbol, host)| (Arc::from(*symbol), Arc::from(*host)))
-        .collect()
-}
-
 #[tokio::test]
 async fn start_failure_after_run_creation_closes_the_run() {
     let launches = Launches::default();
@@ -127,29 +119,29 @@ async fn resume_fails_closed_on_binding_drift_unless_partial_resume_is_requested
     let launches = Launches::default();
     let application = application("drifting", &["worker"], &launches);
     let base = application.kernel();
-    let entry_only = kernel_with(base, &["entry"]);
     let with_extra = kernel_with(base, &["entry", "extra"]);
-    let interface = BTreeSet::from([Arc::from("entry")]);
-    let grammar = RewriteGrammar::new([
-        RewriteProduction::new(
-            "drop-worker",
-            RewriteFragment::from_kernel(base),
-            interface.clone(),
-            BTreeSet::new(),
-            RewriteFragment::from_kernel(&entry_only),
-        )
-        .unwrap(),
-        RewriteProduction::new(
-            "add-extra",
-            RewriteFragment::from_kernel(&entry_only),
-            interface,
-            BTreeSet::new(),
-            RewriteFragment::from_kernel(&with_extra),
-        )
-        .unwrap(),
-    ])
-    .unwrap();
-    let application = application.with_grammar(grammar);
+    let drop_worker = GraphEdit::new(
+        BTreeSet::from([Arc::from("worker")]),
+        base.graph()
+            .edges()
+            .iter()
+            .map(|edge| Arc::from(edge.id()))
+            .collect(),
+        GraphFragment::default(),
+    );
+    let add_extra = GraphEdit::new(
+        BTreeSet::new(),
+        BTreeSet::new(),
+        GraphFragment::new(
+            vec![Node::new("extra").unwrap()],
+            vec![],
+            vec![with_extra.node_definition("extra").unwrap().clone()],
+            vec![],
+            vec![],
+            vec![],
+        ),
+    );
+    let application = application.with_policy(Arc::new(PermitAll));
     let directory = tempfile::tempdir().unwrap();
     let run = application
         .start_in(directory.path(), payload())
@@ -158,26 +150,8 @@ async fn resume_fails_closed_on_binding_drift_unless_partial_resume_is_requested
     run.wait_idle().await;
     assert_eq!(run.executions().len(), 2);
 
-    for request in [
-        RewriteRequest::new(
-            "drop-worker",
-            RewriteMatch::new(
-                symbols(&[("entry", "entry"), ("worker", "worker")]),
-                BTreeMap::new(),
-                BTreeMap::new(),
-                BTreeMap::new(),
-            ),
-        ),
-        RewriteRequest::new(
-            "add-extra",
-            RewriteMatch::new(
-                symbols(&[("entry", "entry")]),
-                BTreeMap::new(),
-                symbols(&[("extra", "extra")]),
-                BTreeMap::new(),
-            ),
-        ),
-    ] {
+    for edit in [drop_worker, add_extra] {
+        let request = RewriteRequest::new(Principal::new("operator"), edit);
         let plan = run
             .session()
             .prepare_rewrite(&request)

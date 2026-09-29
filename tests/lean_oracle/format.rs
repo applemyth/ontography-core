@@ -8,14 +8,14 @@ use std::sync::Arc;
 use ontography::{
     Activation, ActivationId, Authority, AuthorityMatch, AuthorityTag, AuthorityTransitionRule,
     Checkpoint, ContentDigest, Contract, ContractViolation, DefinitionError, DefinitionFingerprint,
-    DefinitionId, Edge, EdgeDefinition, Graph, IngressMode, Kernel, Node, NodeDefinition,
-    PackageId, PackageRecord, PackageStatus, RetirementReason, RewriteFragment, RewriteGrammar,
-    RewriteMatch, RewriteProduction, RewriteRequest, RootRule, Schema, Trigger,
+    DefinitionId, Edge, EdgeDefinition, Graph, GraphEdit, GraphFragment, IngressMode, Kernel, Node,
+    NodeDefinition, PackageId, PackageRecord, PackageStatus, Principal, RetirementReason,
+    RewriteRequest, RootRule, Schema, Trigger,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-pub const FORMAT: &str = "ontography-lean-trace/2";
+pub const FORMAT: &str = "ontography-lean-trace/3";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -30,7 +30,6 @@ pub struct Trace {
     pub validators: BTreeMap<String, Validator>,
     /// Payload hex to `ContentDigest::compute` of those bytes, in hex.
     pub digests: BTreeMap<String, String>,
-    pub grammar: Vec<ProductionSpec>,
     pub definition: DefinitionSpec,
     pub ops: Vec<TraceOp>,
 }
@@ -94,7 +93,7 @@ pub struct DefinitionSpec {
     pub roots: Vec<RootSpec>,
 }
 
-/// The graph and annotations of a definition or a production side.
+/// The graph and annotations of a definition, or what an edit adds.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FragmentSpec {
@@ -164,25 +163,16 @@ pub struct RootSpec {
     pub ceiling: Vec<String>,
 }
 
-/// A production `L ← K → R`, with `K` given by its node and edge symbols.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProductionSpec {
-    pub id: String,
-    pub left: FragmentSpec,
-    pub interface_nodes: Vec<String>,
-    pub interface_edges: Vec<String>,
-    pub right: FragmentSpec,
-}
-
-/// Symbol bindings: `L`'s symbols to current identities, `R ∖ K`'s to fresh ones.
+/// A graph edit: current nodes and edges to remove, and a fragment of fresh
+/// ones to add. The removal lists denote sets; the recorder writes them
+/// sorted and without repeats, because the kernel's edit holds sets and the
+/// model reads a list with a repeat as no edit at all.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct MatchSpec {
-    pub nodes: Vec<(String, String)>,
-    pub edges: Vec<(String, String)>,
-    pub fresh_nodes: Vec<(String, String)>,
-    pub fresh_edges: Vec<(String, String)>,
+pub struct EditSpec {
+    pub remove_nodes: Vec<String>,
+    pub remove_edges: Vec<String>,
+    pub add: FragmentSpec,
 }
 
 /// A package identity `[producer, output]`: the producer's `u128` in decimal
@@ -217,9 +207,10 @@ pub enum TraceOp {
         expect: Option<Expectation>,
     },
     Rewrite {
-        production: String,
-        #[serde(rename = "match")]
-        matching: MatchSpec,
+        /// The principal asking for the edit; the run's policy refuses
+        /// exactly `"denied"`.
+        principal: String,
+        edit: EditSpec,
         /// Digest hex to the payload hex offered for that commitment.
         evidence: BTreeMap<String, String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -573,56 +564,33 @@ pub fn extended(
     )
 }
 
-fn fragment(spec: &FragmentSpec) -> RewriteFragment {
-    let (nodes, edges, node_definitions, edge_definitions, transitions, roots) =
-        parts(spec).expect("production fragments are well formed");
-    RewriteFragment::new(
-        nodes,
-        edges,
-        node_definitions,
-        edge_definitions,
-        transitions,
-        roots,
-    )
-}
-
-pub fn grammar(specs: &[ProductionSpec]) -> RewriteGrammar {
-    let names = |symbols: &[String]| symbols.iter().map(|id| Arc::from(id.as_str())).collect();
-    RewriteGrammar::new(specs.iter().map(|spec| {
-        RewriteProduction::new(
-            spec.id.as_str(),
-            fragment(&spec.left),
-            names(&spec.interface_nodes),
-            names(&spec.interface_edges),
-            fragment(&spec.right),
-        )
-        .unwrap_or_else(|error| panic!("production {} is ill-shaped: {error}", spec.id))
-    }))
-    .expect("production identities are distinct")
-}
-
-pub fn request(production: &str, matching: &MatchSpec) -> RewriteRequest {
-    let map = |pairs: &[(String, String)]| -> BTreeMap<Arc<str>, Arc<str>> {
-        let map: BTreeMap<Arc<str>, Arc<str>> = pairs
-            .iter()
-            .map(|(symbol, id)| (Arc::from(symbol.as_str()), Arc::from(id.as_str())))
-            .collect();
-        assert_eq!(
-            map.len(),
-            pairs.len(),
-            "a binding names each symbol once: {pairs:?}"
-        );
-        map
-    };
-    RewriteRequest::new(
-        production,
-        RewriteMatch::new(
-            map(&matching.nodes),
-            map(&matching.edges),
-            map(&matching.fresh_nodes),
-            map(&matching.fresh_edges),
+/// The request a trace edit denotes, or the constructor error when one of
+/// its added elements is not even a well-formed kernel value (such as an
+/// empty identity). The kernel cannot be asked such an edit, and the model's
+/// structural premises refuse it, so the harness records it as rejected.
+pub fn request(principal: &str, edit: &EditSpec) -> Result<RewriteRequest, DefinitionError> {
+    let (nodes, edges, node_definitions, edge_definitions, transitions, roots) = parts(&edit.add)?;
+    let set = |ids: &[String]| ids.iter().map(|id| Arc::from(id.as_str())).collect();
+    Ok(RewriteRequest::new(
+        Principal::new(principal),
+        GraphEdit::new(
+            set(&edit.remove_nodes),
+            set(&edit.remove_edges),
+            GraphFragment::new(
+                nodes,
+                edges,
+                node_definitions,
+                edge_definitions,
+                transitions,
+                roots,
+            ),
         ),
-    )
+    ))
+}
+
+/// Whether a list names each identity at most once.
+pub fn distinct(ids: &[String]) -> bool {
+    ids.iter().collect::<BTreeSet<_>>().len() == ids.len()
 }
 
 // The canonical state of `formal/TRACE_FORMAT.md`.

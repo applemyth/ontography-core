@@ -10,8 +10,9 @@ definition through rewrites and extensions. After each operation it writes one l
 the step index, whether `sysStep` accepted the operation, and the canonical encoding of the
 resulting definition and state, which are the predecessor's when the operation is rejected.
 
-The oracle adds no rule of its own: the validators, the commitment function, and the grammar
-come from the trace, and every decision is `sysStep`'s.
+The oracle adds no rule of its own: the validators and the commitment function come from the
+trace, the rewrite policy is the one the format fixes (`Oracle.policy`), and every decision is
+`sysStep`'s.
 
 Exit status: 0 after replaying every operation, 2 for a malformed trace.
 -/
@@ -31,7 +32,7 @@ def main : IO UInt32 := do
     let mut state := State.initial trace.definition
     for (op, index) in trace.ops.zipIdx do
       let (accepted, next) :=
-        match sysStep trace.accepts trace.commit trace.grammar definition state op with
+        match sysStep trace.accepts trace.commit Oracle.policy definition state op with
         | some next => (true, next)
         | none => (false, (definition, state))
       (definition, state) := next

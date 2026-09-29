@@ -54,8 +54,8 @@ use ontography_calculus::storage::{
     ActivationId, Delivery, PackageId, PackageRecord, Retirement, RetirementReason, Transition,
 };
 use ontography_calculus::{
-    ActivationProposal, ContentDigest, ExtensionError, Kernel, Payload, Phase, Reject, RetireError,
-    RewriteError, RewriteGrammar, RewriteRequest, State, StateParts, StateRestoreError,
+    ActivationProposal, ContentDigest, DenyAll, EditPolicy, ExtensionError, Kernel, Payload, Phase,
+    Reject, RetireError, RewriteError, RewriteRequest, State, StateParts, StateRestoreError,
     TransferError,
 };
 use ontography_content::content::{ContentError, ContentId, ContentReader, ContentStore};
@@ -516,7 +516,7 @@ impl SubmissionCustody {
 }
 
 struct SessionCore {
-    grammar: Arc<RewriteGrammar>,
+    policy: Arc<dyn EditPolicy>,
     inner: AsyncMutex<SessionState>,
     status: watch::Sender<SessionStatus>,
     frontier: watch::Sender<u64>,
@@ -616,7 +616,7 @@ impl SessionCore {
             objects,
             ..
         } = &mut *inner;
-        Ok(facts.prepare_rewrite(kernel, objects, &self.grammar, request)?)
+        Ok(facts.prepare_rewrite(kernel, objects, self.policy.as_ref(), request)?)
     }
 
     async fn commit_rewrite(
@@ -1353,7 +1353,7 @@ struct ProposalRuntimeControl {
 
 struct ProposalRuntimeCore {
     kernel: Arc<Kernel>,
-    grammar: Arc<RewriteGrammar>,
+    policy: Arc<dyn EditPolicy>,
     next_session_id: AtomicU64,
     control: Mutex<ProposalRuntimeControl>,
 }
@@ -1419,7 +1419,7 @@ impl Drop for SessionRegistration {
     }
 }
 
-/// Independent host for sessions sharing an initial graph and rewrite grammar.
+/// Independent host for sessions sharing an initial graph and graph-edit policy.
 ///
 /// This core contains no compiled executable bindings and assigns no semantic
 /// type to a graph node. Opaque hosts may retain a [`SessionHandle`], observe
@@ -1446,19 +1446,19 @@ impl fmt::Debug for ProposalRuntime {
 }
 
 impl ProposalRuntime {
-    /// Creates a runtime with an empty rewrite grammar.
+    /// Creates a runtime whose sessions accept no graph edits.
     #[must_use]
     pub fn new(kernel: Arc<Kernel>) -> Self {
-        Self::with_grammar(kernel, RewriteGrammar::default())
+        Self::with_policy(kernel, Arc::new(DenyAll))
     }
 
-    /// Creates a runtime with one immutable set of permitted rewrite productions.
+    /// Creates a runtime whose sessions admit graph edits under `policy`.
     #[must_use]
-    pub fn with_grammar(kernel: Arc<Kernel>, grammar: RewriteGrammar) -> Self {
+    pub fn with_policy(kernel: Arc<Kernel>, policy: Arc<dyn EditPolicy>) -> Self {
         Self {
             core: Arc::new(ProposalRuntimeCore {
                 kernel,
-                grammar: Arc::new(grammar),
+                policy,
                 next_session_id: AtomicU64::new(1),
                 control: Mutex::new(ProposalRuntimeControl {
                     accepting: true,
@@ -1648,7 +1648,7 @@ impl ProposalRuntime {
         let (status, _) = watch::channel(initial_status);
         let (frontier, _) = watch::channel(revision);
         let session = Arc::new(SessionCore {
-            grammar: Arc::clone(&self.core.grammar),
+            policy: Arc::clone(&self.core.policy),
             inner: AsyncMutex::new(SessionState {
                 kernel: current_kernel,
                 status: initial_status,
@@ -2245,40 +2245,31 @@ mod tests {
         use std::io::Write as _;
 
         use iroh_blobs::Hash;
-        use ontography_calculus::{
-            RewriteFragment, RewriteGrammar, RewriteMatch, RewriteProduction, RewriteRequest,
-        };
+        use ontography_calculus::{GraphEdit, GraphFragment, PermitAll, Principal, RewriteRequest};
 
         let directory = tempfile::tempdir().expect("temporary directory");
         let run = directory.path().join("run");
         let kernel = persistent_kernel();
-        let same = |ids: &[&str]| -> BTreeMap<Arc<str>, Arc<str>> {
-            ids.iter()
-                .map(|id| (Arc::from(*id), Arc::from(*id)))
-                .collect()
-        };
-        let production = RewriteProduction::new(
-            "replace",
-            RewriteFragment::from_kernel(&kernel),
-            BTreeSet::from([Arc::from("source"), Arc::from("sink")]),
-            BTreeSet::new(),
-            RewriteFragment::from_kernel(&test_kernel_with_edge(false, "source.sink2")),
-        )
-        .expect("production");
-        let grammar = RewriteGrammar::new([production]).expect("grammar");
+        let replacement = test_kernel_with_edge(false, "source.sink2");
         let request = RewriteRequest::new(
-            "replace",
-            RewriteMatch::new(
-                same(&["source", "sink"]),
-                same(&["source.sink"]),
-                BTreeMap::new(),
-                same(&["source.sink2"]),
+            Principal::new("test"),
+            GraphEdit::new(
+                BTreeSet::new(),
+                BTreeSet::from([Arc::from("source.sink")]),
+                GraphFragment::new(
+                    vec![],
+                    replacement.graph().edges().to_vec(),
+                    vec![],
+                    replacement.edge_definitions().to_vec(),
+                    vec![],
+                    vec![],
+                ),
             ),
         );
         // Larger than the store's inline threshold, so the bytes live in
         // their own data file.
         let message: Payload = Arc::from(vec![0x4d; 200_000]);
-        let runtime = ProposalRuntime::with_grammar(Arc::clone(&kernel), grammar.clone());
+        let runtime = ProposalRuntime::with_policy(Arc::clone(&kernel), Arc::new(PermitAll));
         let session = runtime.create_persistent(&run).expect("persistent session");
         let mut proposal = root(&kernel, b"result", None);
         proposal.emit(Emission::outbound(
@@ -2305,7 +2296,7 @@ mod tests {
         file.write_all(b"corruption").expect("corrupt the payload");
         file.sync_all().expect("sync the corruption");
 
-        let runtime = ProposalRuntime::with_grammar(Arc::clone(&kernel), grammar);
+        let runtime = ProposalRuntime::with_policy(Arc::clone(&kernel), Arc::new(PermitAll));
         let session = runtime.open_persistent(&run).expect("reopened session");
         assert!(matches!(
             session.transfer(package, "source.sink").await,

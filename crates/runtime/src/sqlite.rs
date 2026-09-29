@@ -23,14 +23,14 @@ use super::object_store::{ObjectStore, ObjectStoreError};
 use super::panic_message;
 use super::session::{FrontierCounts, PackageHistory, SessionStatus};
 use ontography_calculus::storage::{
-    Activation, ActivationId, Binding, Checkpoint, Delivery, FragmentData, FrontierView, Output,
-    PackageId, PackageRecord, PackageStatus, PackageView, Retirement, RetirementReason,
-    RewriteFragment, Transition, TransitionKind, Trigger,
+    Activation, ActivationId, Binding, Checkpoint, Delivery, FragmentData, FrontierView,
+    GraphFragment, Output, PackageId, PackageRecord, PackageStatus, PackageView, Retirement,
+    RetirementReason, Transition, TransitionKind, Trigger,
 };
 use ontography_calculus::{
     ActivationProposal, Authority, AuthorityTag, ContentDigest, DefinitionFingerprint,
-    DefinitionId, ExtensionError, IngressMode, Kernel, Payload, Phase, Reject, RetireError,
-    RewriteError, RewriteGrammar, RewriteRequest, State, TransferError,
+    DefinitionId, EditPolicy, ExtensionError, IngressMode, Kernel, Payload, Phase, Reject,
+    RetireError, RewriteError, RewriteRequest, State, TransferError,
 };
 use ontography_content::content::ContentId;
 
@@ -953,7 +953,7 @@ impl SqliteSession {
         &mut self,
         kernel: &Kernel,
         objects: &ObjectStore,
-        grammar: &RewriteGrammar,
+        policy: &dyn EditPolicy,
         request: &RewriteRequest,
     ) -> Result<Result<(Transition, Arc<Kernel>), RewriteError>, SqliteStateError> {
         // Rewrite preparation reads the live frontier and lifetime identities
@@ -964,9 +964,7 @@ impl SqliteSession {
         let view = read_view(&transaction, &[], &[], true)?;
         let mut evidence = Evidence::new(objects);
         let evaluated = evaluate(|| {
-            kernel.evaluate_rewrite(&view, grammar, request, |_, digest| {
-                evidence.resolve(digest)
-            })
+            kernel.evaluate_rewrite(&view, policy, request, |_, digest| evidence.resolve(digest))
         })?;
         drop(transaction);
         evidence.checked(evaluated)
@@ -1663,7 +1661,7 @@ fn encode_json(value: &impl serde::Serialize) -> Result<Vec<u8>, SqliteStateErro
 }
 
 fn encode_fragment(kernel: &Kernel) -> Result<Vec<u8>, SqliteStateError> {
-    encode_json(&FragmentData::from(&RewriteFragment::from_kernel(kernel)))
+    encode_json(&FragmentData::from(&GraphFragment::from_kernel(kernel)))
 }
 
 fn decode_content_id(bytes: Vec<u8>) -> Result<ContentId, SqliteStateError> {
@@ -1719,7 +1717,7 @@ fn read_current_kernel(
     )?;
     let data: FragmentData = serde_json::from_slice(&graph)
         .map_err(|error| SqliteStateError::invalid(error.to_string()))?;
-    let fragment = RewriteFragment::try_from(data)
+    let fragment = GraphFragment::try_from(data)
         .map_err(|error| SqliteStateError::invalid(error.to_string()))?;
     let kernel = Arc::new(
         binding

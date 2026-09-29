@@ -1,19 +1,20 @@
 //! The kernel against its Lean model. Runs of the in-memory kernel over a few
-//! fixed definitions and their rewrite grammars are recorded as traces
-//! (`formal/TRACE_FORMAT.md`) holding the kernel's outcome, current
-//! definition, and canonical state after every operation. The Lean oracle
+//! fixed definitions are recorded as traces (`formal/TRACE_FORMAT.md`)
+//! holding the kernel's outcome, current definition, and canonical state
+//! after every operation. The Lean oracle
 //! (`formal/Oracle`) replays each trace with the model's `sysStep`; acceptance,
 //! the definition, and the state must agree at every step. Error variants are
 //! not compared, since the model's rules carry no rejection reason.
 //!
 //! Operations are activations, transfers, explicit retirements, rewrites
-//! (`prepare_rewrite` and `commit_rewrite`), and extensions
-//! (`prepare_extension` and `commit_extension`). Each fixture's grammar is
-//! derived from its own node and edge kinds. A required prefix pins the rare
-//! cases before random exploration: the six scenarios of
-//! `formal/Ontography/Examples.lean`, each its own run, and on each fixture
-//! the fixed-graph cases and, on the coverage fixture, every way a rewrite or
-//! extension can fail. A plan committed after its state changed must be
+//! (`prepare_rewrite` and `commit_rewrite` of a graph edit), and extensions
+//! (`prepare_extension` and `commit_extension`). Every trace runs under the
+//! same edit policy, which refuses exactly the principal `"denied"`. Random
+//! edits are shaped from the current graph's own node and edge kinds. A
+//! required prefix pins the rare cases before random exploration: the
+//! scenarios of `formal/Ontography/Examples.lean`, each its own run, and on
+//! each fixture the fixed-graph cases and, on the coverage fixture, every way
+//! a rewrite or extension can fail. A plan committed after its state changed must be
 //! refused as stale, which the harness checks against the kernel alone,
 //! because the model has no plans. Random choices index packages in birth
 //! order, so a seed fixes the operation sequence even though the kernel draws
@@ -44,7 +45,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use crate::explore::{Rng, random_step};
-use crate::fixtures::{FIXTURES, derived_grammar};
+use crate::fixtures::FIXTURES;
 use crate::format::KnownDisagreement;
 use crate::oracle::{
     check, committed_traces, describe, first_mismatch, oracle, replay_in_kernel, replay_in_model,
@@ -61,12 +62,10 @@ const RANDOM_STEPS: usize = 150;
 fn random_run(seed: u64) -> Run {
     let fixture = &FIXTURES[usize::try_from(seed % 3).unwrap()];
     let setup = (fixture.setup)();
-    let grammar = derived_grammar(&setup.definition, &setup.validators);
     let mut run = Run::new(
         format!("{}-{seed}", fixture.name),
         Some(seed),
         setup.definition.clone(),
-        grammar,
         setup.all_validators(),
     );
     (fixture.prefix)(&mut run);

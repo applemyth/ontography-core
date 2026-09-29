@@ -15,9 +15,9 @@ use ontography::storage::{
 };
 use ontography::{
     ActivationId, ActivationProposal, Authority, AuthorityTag, Contract, DefinitionId, Delivery,
-    Edge, EdgeDefinition, Emission, Graph, IngressMode, Kernel, Node, NodeDefinition,
-    OutputAuthority, PackageId, RewriteError, RewriteFragment, RewriteGrammar, RewriteMatch,
-    RewriteProduction, RewriteRequest, RootRule, Schema, State,
+    Edge, EdgeDefinition, Emission, Graph, GraphEdit, GraphFragment, IngressMode, Kernel, Node,
+    NodeDefinition, OutputAuthority, PackageId, PermitAll, Principal, RewriteError, RewriteRequest,
+    RootRule, Schema, State,
 };
 
 fn bytes(value: &'static [u8]) -> Arc<[u8]> {
@@ -66,17 +66,9 @@ fn admit(id: &str, nodes: &[&str], edges: &[EdgeSpec]) -> Kernel {
                 definition
             }
         }),
-        edges.iter().map(|(edge, _, _, contract)| {
-            EdgeDefinition::new(
-                *edge,
-                ["Flow"],
-                ["Node"],
-                ["Node"],
-                *contract,
-                [tag("route")],
-            )
-            .unwrap()
-        }),
+        edges
+            .iter()
+            .map(|(edge, _, _, contract)| annotation(edge, contract)),
         [],
         nodes
             .iter()
@@ -90,52 +82,35 @@ fn kernel() -> Kernel {
     admit("verify", &NODES, &EDGES)
 }
 
-/// The sub-definition of `kernel` on `nodes` and `edges`, as a rule fragment.
-fn fragment(kernel: &Kernel, nodes: &[&str], edges: &[&str]) -> RewriteFragment {
-    let nodes: BTreeSet<&str> = nodes.iter().copied().collect();
-    let edges: BTreeSet<&str> = edges.iter().copied().collect();
-    RewriteFragment::new(
-        kernel
-            .graph()
-            .nodes()
-            .iter()
-            .filter(|node| nodes.contains(node.id()))
-            .cloned()
-            .collect(),
-        kernel
-            .graph()
-            .edges()
-            .iter()
-            .filter(|edge| edges.contains(edge.id()))
-            .cloned()
-            .collect(),
-        kernel
-            .node_definitions()
-            .iter()
-            .filter(|node| nodes.contains(node.node_id()))
-            .cloned()
-            .collect(),
-        kernel
-            .edge_definitions()
-            .iter()
-            .filter(|edge| edges.contains(edge.edge_id()))
-            .cloned()
-            .collect(),
-        Vec::new(),
-        kernel
-            .roots()
-            .iter()
-            .filter(|root| nodes.contains(root.node_id()))
-            .cloned()
-            .collect(),
-    )
+/// Every fixture edge carries the same annotation; only its contract varies.
+fn annotation(edge: &str, contract: &str) -> EdgeDefinition {
+    EdgeDefinition::new(edge, ["Flow"], ["Node"], ["Node"], contract, [tag("route")]).unwrap()
 }
 
-fn ids(pairs: &[(&str, &str)]) -> BTreeMap<Arc<str>, Arc<str>> {
-    pairs
-        .iter()
-        .map(|(symbol, actual)| (Arc::from(*symbol), Arc::from(*actual)))
-        .collect()
+/// A request to remove `nodes` and `edges` and add `added`, each added edge
+/// annotated like the fixture's own.
+fn edit(nodes: &[&str], edges: &[&str], added: &[EdgeSpec]) -> RewriteRequest {
+    RewriteRequest::new(
+        Principal::new("verify"),
+        GraphEdit::new(
+            names(nodes),
+            names(edges),
+            GraphFragment::new(
+                Vec::new(),
+                added
+                    .iter()
+                    .map(|(edge, source, target, _)| Edge::new(*edge, *source, *target).unwrap())
+                    .collect(),
+                Vec::new(),
+                added
+                    .iter()
+                    .map(|(edge, _, _, contract)| annotation(edge, contract))
+                    .collect(),
+                Vec::new(),
+                Vec::new(),
+            ),
+        ),
+    )
 }
 
 fn names(values: &[&str]) -> BTreeSet<Arc<str>> {
@@ -569,50 +544,13 @@ fn rewrite_forgeries_are_rejected_by_the_true_state() {
     let mut state = kernel.empty_state();
     let received = PackageId::from_parts(root(&kernel, &mut state, "a", &[delivered("e1")]), 0);
 
-    // Productions: `reroute` replaces every edge out of `a` with `e5`, whose
+    // Edits: `reroute` replaces every edge out of `a` with `e5`, whose
     // contract rejects Items; `drop_b` deletes `b` with its edges;
     // `drop_e4` deletes `e4`; `readd` adds an edge under a supplied identity.
-    let all = fragment(&kernel, &NODES, &["e1", "e2", "e3", "e4"]);
-    let mut rerouted = fragment(&kernel, &NODES, &["e4"]);
-    rerouted = with_edge(rerouted, "e5", "a", "b", "note");
-    let readd_right = with_edge(fragment(&kernel, &["a", "b"], &[]), "x", "b", "a", "item");
-    let grammar = RewriteGrammar::new([
-        RewriteProduction::new(
-            "reroute",
-            all.clone(),
-            names(&NODES),
-            names(&["e4"]),
-            rerouted,
-        )
-        .unwrap(),
-        RewriteProduction::new(
-            "drop_b",
-            all.clone(),
-            names(&["a", "c"]),
-            names(&["e2", "e3"]),
-            fragment(&kernel, &["a", "c"], &["e2", "e3"]),
-        )
-        .unwrap(),
-        RewriteProduction::new(
-            "drop_e4",
-            fragment(&kernel, &["a", "b"], &["e4"]),
-            names(&["a", "b"]),
-            BTreeSet::new(),
-            fragment(&kernel, &["a", "b"], &[]),
-        )
-        .unwrap(),
-        RewriteProduction::new(
-            "readd",
-            fragment(&kernel, &["a", "b"], &[]),
-            names(&["a", "b"]),
-            BTreeSet::new(),
-            readd_right,
-        )
-        .unwrap(),
-    ])
-    .unwrap();
-    let identity = ids(&[("a", "a"), ("b", "b"), ("c", "c")]);
-    let all_edges = ids(&[("e1", "e1"), ("e2", "e2"), ("e3", "e3"), ("e4", "e4")]);
+    let reroute = edit(&[], &["e1", "e2", "e3"], &[("e5", "a", "b", "note")]);
+    let drop_b = edit(&["b"], &["e1", "e4"], &[]);
+    let drop_e4 = edit(&[], &["e4"], &[]);
+    let readd = edit(&[], &[], &[("e4", "b", "a", "item")]);
 
     // RetirementInconsistent: the view shows the receipt as still outbound at
     // `a`, so the reroute retires it as NoAcceptingEdge; it is truly In at `b`.
@@ -620,17 +558,8 @@ fn rewrite_forgeries_are_rejected_by_the_true_state() {
     let as_out = out_record(&state, received);
     lie.records.insert(received, Some(as_out.clone()));
     lie.live = Some(vec![(received, as_out)]);
-    let reroute = RewriteRequest::new(
-        "reroute",
-        RewriteMatch::new(
-            identity.clone(),
-            all_edges.clone(),
-            ids(&[]),
-            ids(&[("e5", "e5")]),
-        ),
-    );
     let (inconsistent, _) = kernel
-        .evaluate_rewrite(&forged(&state, lie), &grammar, &reroute, payload())
+        .evaluate_rewrite(&forged(&state, lie), &PermitAll, &reroute, payload())
         .unwrap();
     assert_eq!(
         inconsistent.retirements().get(&received),
@@ -649,12 +578,8 @@ fn rewrite_forgeries_are_rejected_by_the_true_state() {
         live: Some(Vec::new()),
         ..Forgery::default()
     };
-    let drop_b = RewriteRequest::new(
-        "drop_b",
-        RewriteMatch::new(identity.clone(), all_edges.clone(), ids(&[]), ids(&[])),
-    );
     let (stranding, _) = kernel
-        .evaluate_rewrite(&forged(&state, lie), &grammar, &drop_b, payload())
+        .evaluate_rewrite(&forged(&state, lie), &PermitAll, &drop_b, payload())
         .unwrap();
     assert!(stranding.retirements().is_empty());
     rejects(
@@ -665,18 +590,9 @@ fn rewrite_forgeries_are_rejected_by_the_true_state() {
     );
 
     // IdentityReused: after `e4` is deleted for real, the view forgets it was
-    // ever used, and a production re-adds an edge under that identity.
-    let drop_e4 = RewriteRequest::new(
-        "drop_e4",
-        RewriteMatch::new(
-            ids(&[("a", "a"), ("b", "b")]),
-            ids(&[("e4", "e4")]),
-            ids(&[]),
-            ids(&[]),
-        ),
-    );
+    // ever used, and an edit re-adds an edge under that identity.
     let prepared = kernel
-        .prepare_rewrite_with_evidence(&state, &grammar, &drop_e4, payload())
+        .prepare_rewrite_with_evidence(&state, &PermitAll, &drop_e4, payload())
         .unwrap();
     let kernel = kernel.commit_rewrite(&mut state, prepared).unwrap();
     assert!(state.used_edge_ids().contains("e4"));
@@ -691,17 +607,8 @@ fn rewrite_forgeries_are_rejected_by_the_true_state() {
         ),
         ..Forgery::default()
     };
-    let readd = RewriteRequest::new(
-        "readd",
-        RewriteMatch::new(
-            ids(&[("a", "a"), ("b", "b")]),
-            ids(&[]),
-            ids(&[]),
-            ids(&[("x", "e4")]),
-        ),
-    );
     let (reused, _) = kernel
-        .evaluate_rewrite(&forged(&state, lie), &grammar, &readd, payload())
+        .evaluate_rewrite(&forged(&state, lie), &PermitAll, &readd, payload())
         .unwrap();
     rejects(
         &kernel,
@@ -711,93 +618,9 @@ fn rewrite_forgeries_are_rejected_by_the_true_state() {
     );
     // The faithful view refuses the same request at evaluation.
     assert!(matches!(
-        kernel.evaluate_rewrite(&state, &grammar, &readd, payload()),
-        Err(RewriteError::InvalidMatch(_))
+        kernel.evaluate_rewrite(&state, &PermitAll, &readd, payload()),
+        Err(RewriteError::InvalidEdit(_))
     ));
-}
-
-/// Adds one edge with its definition to a fragment.
-fn with_edge(
-    fragment: RewriteFragment,
-    edge: &str,
-    source: &str,
-    target: &str,
-    contract: &str,
-) -> RewriteFragment {
-    let data = ontography::storage::FragmentData::from(&fragment);
-    let mut fragment = RewriteFragment::try_from(data).unwrap();
-    fragment = RewriteFragment::new(
-        fragment_nodes(&fragment),
-        fragment_edges(&fragment)
-            .into_iter()
-            .chain([Edge::new(edge, source, target).unwrap()])
-            .collect(),
-        fragment_node_definitions(&fragment),
-        fragment_edge_definitions(&fragment)
-            .into_iter()
-            .chain([EdgeDefinition::new(
-                edge,
-                ["Flow"],
-                ["Node"],
-                ["Node"],
-                contract,
-                [tag("route")],
-            )
-            .unwrap()])
-            .collect(),
-        Vec::new(),
-        fragment_roots(&fragment),
-    );
-    fragment
-}
-
-fn admitted(fragment: &RewriteFragment) -> Kernel {
-    kernel().admit_fragment(fragment).unwrap()
-}
-fn fragment_nodes(fragment: &RewriteFragment) -> Vec<Node> {
-    admitted(fragment).graph().nodes().to_vec()
-}
-fn fragment_edges(fragment: &RewriteFragment) -> Vec<Edge> {
-    admitted(fragment).graph().edges().to_vec()
-}
-fn fragment_node_definitions(fragment: &RewriteFragment) -> Vec<NodeDefinition> {
-    admitted(fragment).node_definitions().to_vec()
-}
-fn fragment_edge_definitions(fragment: &RewriteFragment) -> Vec<EdgeDefinition> {
-    admitted(fragment).edge_definitions().to_vec()
-}
-fn fragment_roots(fragment: &RewriteFragment) -> Vec<RootRule> {
-    admitted(fragment).roots().to_vec()
-}
-
-fn drop_edges(kernel: &Kernel, removed: &[&str]) -> (RewriteGrammar, RewriteRequest) {
-    let kept: Vec<_> = kernel
-        .graph()
-        .edges()
-        .iter()
-        .map(Edge::id)
-        .filter(|e| !removed.contains(e))
-        .collect();
-    let all: Vec<_> = kernel.graph().edges().iter().map(Edge::id).collect();
-    let node_ids: Vec<_> = kernel.graph().nodes().iter().map(Node::id).collect();
-    let rule = RewriteProduction::new(
-        "drop",
-        fragment(kernel, &node_ids, &all),
-        names(&node_ids),
-        names(&kept),
-        fragment(kernel, &node_ids, &kept),
-    )
-    .unwrap();
-    let req = RewriteRequest::new(
-        "drop",
-        RewriteMatch::new(
-            ids(&node_ids.iter().map(|n| (*n, *n)).collect::<Vec<_>>()),
-            ids(&all.iter().map(|e| (*e, *e)).collect::<Vec<_>>()),
-            ids(&[]),
-            ids(&[]),
-        ),
-    );
-    (RewriteGrammar::new([rule]).unwrap(), req)
 }
 
 #[test]
@@ -901,13 +724,17 @@ fn omitted_all_retirement_is_rejected() {
     let kernel = kernel();
     let mut state = kernel.empty_state();
     let package = PackageId::from_parts(root(&kernel, &mut state, "a", &[delivered("e2")]), 0);
-    let (grammar, req) = drop_edges(&kernel, &["e2"]);
     let lie = Forgery {
         live: Some(vec![]),
         ..Forgery::default()
     };
     let (transition, _next) = kernel
-        .evaluate_rewrite(&forged(&state, lie), &grammar, &req, payload())
+        .evaluate_rewrite(
+            &forged(&state, lie),
+            &PermitAll,
+            &edit(&[], &["e2"], &[]),
+            payload(),
+        )
         .unwrap();
     rejects(
         &kernel,
@@ -922,24 +749,7 @@ fn surviving_holder_cannot_be_retired_as_removed() {
     let kernel = kernel();
     let mut state = kernel.empty_state();
     let package = PackageId::from_parts(root(&kernel, &mut state, "a", &[outbound()]), 0);
-    let production = RewriteProduction::new(
-        "drop_b",
-        fragment(&kernel, &NODES, &["e1", "e2", "e3", "e4"]),
-        names(&["a", "c"]),
-        names(&["e2", "e3"]),
-        fragment(&kernel, &["a", "c"], &["e2", "e3"]),
-    )
-    .unwrap();
-    let grammar = RewriteGrammar::new([production]).unwrap();
-    let req = RewriteRequest::new(
-        "drop_b",
-        RewriteMatch::new(
-            ids(&[("a", "a"), ("b", "b"), ("c", "c")]),
-            ids(&[("e1", "e1"), ("e2", "e2"), ("e3", "e3"), ("e4", "e4")]),
-            ids(&[]),
-            ids(&[]),
-        ),
-    );
+    let drop_b = edit(&["b"], &["e1", "e4"], &[]);
     let record = state.package(package).unwrap();
     let fake = PackageRecord::new(
         record.object_type(),
@@ -954,7 +764,7 @@ fn surviving_holder_cannot_be_retired_as_removed() {
         ..Forgery::default()
     };
     let (transition, _next) = kernel
-        .evaluate_rewrite(&forged(&state, lie), &grammar, &req, payload())
+        .evaluate_rewrite(&forged(&state, lie), &PermitAll, &drop_b, payload())
         .unwrap();
     assert_eq!(
         transition.retirements()[&package],

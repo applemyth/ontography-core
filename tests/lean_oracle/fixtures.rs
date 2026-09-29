@@ -1,17 +1,19 @@
-//! The fixed definitions random runs explore, the rewrite grammar derived
-//! from each, and the required prefixes that pin every rare case.
+//! The fixed definitions random runs explore, the node and edge kinds edits
+//! copy, and the required prefixes that pin every rare case.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use ontography::{AuthorityTag, IngressMode, Kernel, Retirement, RetirementReason};
 
 use crate::format::{
-    ContractSpec, DefinitionSpec, EdgeDefinitionSpec, EdgeSpec, FragmentSpec, Ingress, Match,
-    MatchSpec, NodeSpec, ProductionSpec, RootSpec, SchemaSpec, TransitionSpec, Validator, hex,
+    ContractSpec, DefinitionSpec, EdgeDefinitionSpec, EdgeSpec, EditSpec, FragmentSpec, Ingress,
+    Match, NodeSpec, RootSpec, SchemaSpec, TransitionSpec, Validator, hex,
 };
 use crate::run::{
-    Run, bind, carry, delivered, extend, joined, names, offer_instead, outbound, outputs, retire,
-    rewrite, rooted, to, transfer, unknown_activation, unknown_package,
+    DENIED, Run, carry, delivered, extend, joined, names, offer_instead, outbound, outputs,
+    removing, retire, rewrite, rewrite_by, rooted, to, transfer, unknown_activation,
+    unknown_package,
 };
 
 /// A definition with the validator each of its contracts names.
@@ -286,18 +288,14 @@ fn sparse_setup() -> Setup {
     }
 }
 
-// Node and edge kinds, as rewrites compare them.
-
-fn set(items: &[String]) -> BTreeSet<String> {
-    items.iter().cloned().collect()
-}
+// Node and edge kinds, which added elements copy.
 
 fn tag_set<'a>(tags: impl Iterator<Item = &'a AuthorityTag>) -> BTreeSet<String> {
     tags.map(|tag| tag.id().to_owned()).collect()
 }
 
-/// What a rewrite requires a matched or preserved node to keep: its types,
-/// result contract, ingress, root ceiling, and authority transitions.
+/// A node's local definition: its types, result contract, ingress, root
+/// ceiling, and authority transitions.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Profile {
     types: BTreeSet<String>,
@@ -307,7 +305,7 @@ pub struct Profile {
     transitions: BTreeSet<(BTreeSet<String>, BTreeSet<String>)>,
 }
 
-/// What a rewrite requires a matched or preserved edge to keep.
+/// An edge's annotation.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Annotation {
     types: BTreeSet<String>,
@@ -316,30 +314,6 @@ pub struct Annotation {
     package_contract: String,
     tags: BTreeSet<String>,
     authority_match: Match,
-}
-
-pub fn profile_in(fragment: &FragmentSpec, node: &str) -> Profile {
-    let definition = fragment
-        .node_definitions
-        .iter()
-        .find(|definition| definition.node == node)
-        .unwrap_or_else(|| panic!("node {node} has a definition"));
-    Profile {
-        types: set(&definition.types),
-        result_contract: definition.result_contract.clone(),
-        ingress: definition.ingress,
-        ceiling: fragment
-            .roots
-            .iter()
-            .find(|root| root.node == node)
-            .map(|root| set(&root.ceiling)),
-        transitions: fragment
-            .transitions
-            .iter()
-            .filter(|rule| rule.node == node)
-            .map(|rule| (set(&rule.source), set(&rule.target)))
-            .collect(),
-    }
 }
 
 pub fn profile_of(kernel: &Kernel, node: &str) -> Option<Profile> {
@@ -363,25 +337,9 @@ pub fn profile_of(kernel: &Kernel, node: &str) -> Option<Profile> {
     })
 }
 
-pub fn annotation_in(fragment: &FragmentSpec, edge: &str) -> Annotation {
-    let definition = fragment
-        .edge_definitions
-        .iter()
-        .find(|definition| definition.edge == edge)
-        .unwrap_or_else(|| panic!("edge {edge} has a definition"));
-    Annotation {
-        types: set(&definition.types),
-        source_requirements: set(&definition.source_requirements),
-        target_requirements: set(&definition.target_requirements),
-        package_contract: definition.package_contract.clone(),
-        tags: set(&definition.tags),
-        authority_match: definition.authority_match,
-    }
-}
-
 pub fn annotation_of(kernel: &Kernel, edge: &str) -> Option<Annotation> {
     let definition = kernel.edge_definition(edge)?;
-    let strings = |items: &BTreeSet<std::sync::Arc<str>>| -> BTreeSet<String> {
+    let strings = |items: &BTreeSet<Arc<str>>| -> BTreeSet<String> {
         items.iter().map(ToString::to_string).collect()
     };
     Some(Annotation {
@@ -397,8 +355,16 @@ pub fn annotation_of(kernel: &Kernel, edge: &str) -> Option<Annotation> {
     })
 }
 
+fn list(items: &BTreeSet<String>) -> Vec<String> {
+    items.iter().cloned().collect()
+}
+
 impl Profile {
-    fn with_type(&self, node_type: &str) -> Self {
+    pub fn types(&self) -> &BTreeSet<String> {
+        &self.types
+    }
+
+    pub fn with_type(&self, node_type: &str) -> Self {
         let mut types = self.types.clone();
         types.insert(node_type.to_owned());
         Self {
@@ -407,25 +373,25 @@ impl Profile {
         }
     }
 
-    /// Places a node of this kind at `symbol`.
-    fn place(&self, fragment: &mut FragmentSpec, symbol: &str) {
-        let list = |items: &BTreeSet<String>| items.iter().cloned().collect::<Vec<_>>();
-        fragment.nodes.push(symbol.to_owned());
+    /// Adds a node of this kind as `id`, with its definition, root rule, and
+    /// authority transitions.
+    pub fn place(&self, fragment: &mut FragmentSpec, id: &str) {
+        fragment.nodes.push(id.to_owned());
         fragment.node_definitions.push(NodeSpec {
-            node: symbol.to_owned(),
+            node: id.to_owned(),
             types: list(&self.types),
             result_contract: self.result_contract.clone(),
             ingress: self.ingress,
         });
         if let Some(ceiling) = &self.ceiling {
             fragment.roots.push(RootSpec {
-                node: symbol.to_owned(),
+                node: id.to_owned(),
                 ceiling: list(ceiling),
             });
         }
         for (source, target) in &self.transitions {
             fragment.transitions.push(TransitionSpec {
-                node: symbol.to_owned(),
+                node: id.to_owned(),
                 source: list(source),
                 target: list(target),
             });
@@ -434,33 +400,42 @@ impl Profile {
 }
 
 impl Annotation {
-    /// Places an edge of this kind at `symbol`, from `source` to `target`.
-    fn connect(&self, fragment: &mut FragmentSpec, symbol: &str, source: &str, target: &str) {
-        let list = |items: &BTreeSet<String>| items.iter().cloned().collect::<Vec<_>>();
+    /// Whether nodes of these types may be its source and target.
+    pub fn fits(&self, source: &BTreeSet<String>, target: &BTreeSet<String>) -> bool {
+        self.source_requirements.is_subset(source) && self.target_requirements.is_subset(target)
+    }
+
+    /// Adds an edge of this kind as `id`, from `source` to `target`.
+    pub fn connect(&self, fragment: &mut FragmentSpec, id: &str, source: &str, target: &str) {
         fragment.edges.push(EdgeSpec {
-            id: symbol.to_owned(),
+            id: id.to_owned(),
             source: source.to_owned(),
             target: target.to_owned(),
         });
-        fragment.edge_definitions.push(EdgeDefinitionSpec {
-            edge: symbol.to_owned(),
+        fragment.edge_definitions.push(self.definition(id));
+    }
+
+    /// Its definition at `id`.
+    pub fn definition(&self, id: &str) -> EdgeDefinitionSpec {
+        EdgeDefinitionSpec {
+            edge: id.to_owned(),
             types: list(&self.types),
             source_requirements: list(&self.source_requirements),
             target_requirements: list(&self.target_requirements),
             package_contract: self.package_contract.clone(),
             tags: list(&self.tags),
             authority_match: self.authority_match,
-        });
+        }
     }
 
-    fn with_contract(&self, contract: &str) -> Self {
+    pub fn with_contract(&self, contract: &str) -> Self {
         Self {
             package_contract: contract.to_owned(),
             ..self.clone()
         }
     }
 
-    fn with_tag(&self, tag: &str) -> Self {
+    pub fn with_tag(&self, tag: &str) -> Self {
         let mut tags = self.tags.clone();
         tags.insert(tag.to_owned());
         Self {
@@ -468,200 +443,6 @@ impl Annotation {
             ..self.clone()
         }
     }
-}
-
-fn fragment_with(
-    nodes: &[(&str, &Profile)],
-    edges: &[(&str, &str, &str, &Annotation)],
-) -> FragmentSpec {
-    let mut fragment = FragmentSpec::default();
-    for (symbol, profile) in nodes {
-        profile.place(&mut fragment, symbol);
-    }
-    for (symbol, source, target, annotation) in edges {
-        annotation.connect(&mut fragment, symbol, source, target);
-    }
-    fragment
-}
-
-fn production(
-    id: &str,
-    left: FragmentSpec,
-    interface_nodes: &[&str],
-    interface_edges: &[&str],
-    right: FragmentSpec,
-) -> ProductionSpec {
-    ProductionSpec {
-        id: id.to_owned(),
-        left,
-        interface_nodes: names(interface_nodes),
-        interface_edges: names(interface_edges),
-        right,
-    }
-}
-
-/// The rewrite grammar of a fixture, derived from its own node and edge
-/// kinds. For each kind of node: an identity (`keep`), a fresh node (`spawn`),
-/// and a deletion (`drop`, which dangles unless the node is isolated). For
-/// each kind of edge: removal (`cut`), an accepting edge added between nodes of
-/// its end kinds (`mend`), a rejecting one (`block`), an identity preserving
-/// the edge (`hold`), a fresh node and edge added beside the preserved edge
-/// (`branch`), and, off self-loops, a stage inserted on it (`stage`), a staged
-/// node removed with both its phases (`unstage`), and the target deleted with
-/// the edge (`drop-target`); on a self-loop, the node deleted with its loop
-/// (`drop-loop`). Plus the empty identity (`nothing`), and productions that
-/// only an extension makes admissible: an edge whose contract it registers
-/// (`mend-late`), an edge carrying a tag it adds (`mend-extra`), and a node of
-/// a type it adds (`spawn-late`).
-pub fn derived_grammar(
-    definition: &DefinitionSpec,
-    validators: &BTreeMap<String, Validator>,
-) -> Vec<ProductionSpec> {
-    let whole = definition.fragment();
-    let reject = definition
-        .contracts
-        .iter()
-        .find(|contract| validators.get(&contract.id) == Some(&Validator::RejectAll))
-        .map_or("late_deny", |contract| contract.id.as_str());
-    let empty = FragmentSpec::default;
-    let mut grammar = vec![production("nothing", empty(), &[], &[], empty())];
-    let mut kinds = BTreeSet::new();
-    for id in &definition.nodes {
-        let profile = profile_in(&whole, id);
-        if !kinds.insert(profile.clone()) {
-            continue;
-        }
-        let one = fragment_with(&[("X", &profile)], &[]);
-        grammar.push(production(
-            &format!("keep:{id}"),
-            one.clone(),
-            &["X"],
-            &[],
-            one.clone(),
-        ));
-        grammar.push(production(
-            &format!("spawn:{id}"),
-            empty(),
-            &[],
-            &[],
-            one.clone(),
-        ));
-        grammar.push(production(&format!("drop:{id}"), one, &[], &[], empty()));
-        if grammar.iter().all(|p| p.id != "spawn-late") {
-            let late = fragment_with(&[("Z", &profile.with_type(LATE_NODE_TYPE))], &[]);
-            grammar.push(production("spawn-late", empty(), &[], &[], late));
-        }
-    }
-    let mut kinds = BTreeSet::new();
-    for edge in &definition.edges {
-        let source = profile_in(&whole, &edge.source);
-        let target = profile_in(&whole, &edge.target);
-        let annotation = annotation_in(&whole, &edge.id);
-        let looped = edge.source == edge.target;
-        if !kinds.insert((source.clone(), target.clone(), annotation.clone(), looped)) {
-            continue;
-        }
-        let id = &edge.id;
-        let (ends, y): (Vec<(&str, &Profile)>, &str) = if looped {
-            (vec![("X", &source)], "X")
-        } else {
-            (vec![("X", &source), ("Y", &target)], "Y")
-        };
-        let interface: Vec<&str> = ends.iter().map(|(symbol, _)| *symbol).collect();
-        let bare = fragment_with(&ends, &[]);
-        let joined = fragment_with(&ends, &[("E", "X", y, &annotation)]);
-        let blocked = fragment_with(&ends, &[("B", "X", y, &annotation.with_contract(reject))]);
-        grammar.push(production(
-            &format!("cut:{id}"),
-            joined.clone(),
-            &interface,
-            &[],
-            bare.clone(),
-        ));
-        grammar.push(production(
-            &format!("mend:{id}"),
-            bare.clone(),
-            &interface,
-            &[],
-            joined.clone(),
-        ));
-        grammar.push(production(
-            &format!("block:{id}"),
-            bare.clone(),
-            &interface,
-            &[],
-            blocked,
-        ));
-        let held: Vec<&str> = vec!["E"];
-        grammar.push(production(
-            &format!("hold:{id}"),
-            joined.clone(),
-            &interface,
-            &held,
-            joined.clone(),
-        ));
-        let branched = fragment_with(
-            &[("X", &source), ("Y", &target), ("Z", &target)],
-            &[("E", "X", y, &annotation), ("F", "X", "Z", &annotation)],
-        );
-        let branched = if looped {
-            fragment_with(
-                &[("X", &source), ("Z", &target)],
-                &[("E", "X", "X", &annotation), ("F", "X", "Z", &annotation)],
-            )
-        } else {
-            branched
-        };
-        grammar.push(production(
-            &format!("branch:{id}"),
-            joined.clone(),
-            &interface,
-            &held,
-            branched,
-        ));
-        if grammar.iter().all(|p| p.id != "mend-late") {
-            let late = fragment_with(&ends, &[("L", "X", y, &annotation.with_contract("late"))]);
-            grammar.push(production("mend-late", bare.clone(), &interface, &[], late));
-            let extra = fragment_with(&ends, &[("T", "X", y, &annotation.with_tag(LATE_TAG))]);
-            grammar.push(production("mend-extra", bare, &interface, &[], extra));
-        }
-        if looped {
-            grammar.push(production(
-                &format!("drop-loop:{id}"),
-                joined,
-                &[],
-                &[],
-                empty(),
-            ));
-        } else {
-            let staged = fragment_with(
-                &[("X", &source), ("Y", &target), ("Z", &target)],
-                &[("F", "X", "Z", &annotation), ("G", "Z", "Y", &annotation)],
-            );
-            grammar.push(production(
-                &format!("stage:{id}"),
-                joined.clone(),
-                &["X", "Y"],
-                &[],
-                staged.clone(),
-            ));
-            grammar.push(production(
-                &format!("unstage:{id}"),
-                staged,
-                &["X", "Y"],
-                &[],
-                joined.clone(),
-            ));
-            grammar.push(production(
-                &format!("drop-target:{id}"),
-                joined,
-                &["X"],
-                &[],
-                fragment_with(&[("X", &source)], &[]),
-            ));
-        }
-    }
-    grammar
 }
 
 // The required prefixes. Each step states the kernel's intended outcome, so
@@ -945,10 +726,11 @@ fn coverage_prefix(run: &mut Run) {
 }
 
 /// Rewrites and extensions on the coverage fixture, after its fixed-graph
-/// prefix: every way a request can fail, evidence missing, mismatched, and
-/// complete, a stage inserted and removed with both phases of its node,
-/// a route removed at an `All` receiver, extensions that enable a production,
-/// and stale and current plans.
+/// prefix: every way an edit can fail, evidence missing, mismatched, and
+/// complete, the policy refusing its principal, a stage inserted and removed
+/// with both phases of its node, a route removed at an `All` receiver, an
+/// added node with its own root rule and transitions, extensions that enable
+/// an edit, and stale and current plans.
 fn rewrite_prefix(run: &mut Run) {
     let waiting = run.accept_activation(
         "outbound work at a",
@@ -962,25 +744,27 @@ fn rewrite_prefix(run: &mut Run) {
         ),
     );
     let [waiting_t, waiting_u] = outputs(waiting);
-    let mend = |edge: &str| MatchSpec {
-        nodes: bind(&[("X", "a"), ("Y", "b")]),
-        fresh_edges: bind(&[("E", edge)]),
-        ..MatchSpec::default()
+    let kernel = Arc::clone(&run.kernel);
+    let kind = |edge: &str| annotation_of(&kernel, edge).expect("a fixture edge");
+    let like = |node: &str| profile_of(&kernel, node).expect("a fixture node");
+    let (ab, aj1) = (kind("ab"), kind("aj1"));
+    let mend = |id: &str| {
+        let mut edit = EditSpec::default();
+        ab.connect(&mut edit.add, id, "a", "b");
+        edit
     };
     let swapped = offer_instead(&[(b"\x02A", b"no"), (b"no", b"\x02A")]);
 
     // Evidence: a changed holder's waiting work is rechecked against its bytes.
+    run.reject("missing evidence", rewrite(mend("ab~1"), BTreeMap::new()));
+    run.reject("mismatched evidence", rewrite(mend("ab~1"), swapped));
     run.reject(
-        "missing evidence",
-        rewrite("mend:ab", mend("ab~1"), BTreeMap::new()),
-    );
-    run.reject(
-        "mismatched evidence",
-        rewrite("mend:ab", mend("ab~1"), swapped),
+        "an admissible edit its principal may not make",
+        rewrite_by(DENIED, mend("ab~1"), run.known_evidence()),
     );
     run.accept(
         "an accepting edge added from a holder with waiting work",
-        rewrite("mend:ab", mend("ab~1"), run.known_evidence()),
+        rewrite(mend("ab~1"), run.known_evidence()),
     );
     assert!(
         run.state.package(waiting_t).unwrap().is_live(),
@@ -995,86 +779,88 @@ fn rewrite_prefix(run: &mut Run) {
         "no edge from a carries the waiting u package's bytes"
     );
 
-    // Requests that fail.
+    // Edits that fail.
     let evidence = run.known_evidence();
-    run.reject(
-        "a fresh edge reusing a current identity",
-        rewrite("mend:ab", mend("ab"), evidence.clone()),
-    );
-    let cut = |nodes: &[(&str, &str)], edges: &[(&str, &str)]| MatchSpec {
-        nodes: bind(nodes),
-        edges: bind(edges),
-        ..MatchSpec::default()
+    let refuse = |run: &mut Run, why: &str, edit: EditSpec| {
+        run.reject(why, rewrite(edit, evidence.clone()));
     };
-    run.reject(
-        "a match missing a symbol",
-        rewrite(
-            "cut:ab",
-            cut(&[("X", "a"), ("Y", "b")], &[]),
-            evidence.clone(),
-        ),
+    refuse(run, "an added edge reusing a current identity", mend("ab"));
+    refuse(
+        run,
+        "removing a node the graph lacks",
+        removing(&["ghost"], &[]),
     );
-    run.reject(
-        "a match binding a symbol the production lacks",
-        rewrite(
-            "cut:ab",
-            cut(&[("X", "a"), ("Y", "b"), ("W", "x")], &[("E", "ab")]),
-            evidence.clone(),
-        ),
+    refuse(
+        run,
+        "removing an edge the graph lacks",
+        removing(&[], &["zz"]),
     );
-    let stage = |fresh: &[(&str, &str)]| MatchSpec {
-        nodes: bind(&[("X", "a"), ("Y", "j")]),
-        edges: bind(&[("E", "aj1")]),
-        fresh_nodes: bind(&[("Z", "z~1")]),
-        fresh_edges: bind(fresh),
-    };
-    run.reject(
-        "a non-injective allocation",
-        rewrite(
-            "stage:aj1",
-            stage(&[("F", "f~1"), ("G", "f~1")]),
-            evidence.clone(),
-        ),
+    refuse(
+        run,
+        "a removed node leaving an edge dangling",
+        removing(&["b"], &["ab", "ab_all", "ab_none", "ab_ok"]),
     );
-    run.reject(
-        "an edge matched to one of another kind",
-        rewrite(
-            "cut:ab",
-            cut(&[("X", "a"), ("Y", "b")], &[("E", "ab_all")]),
-            evidence.clone(),
-        ),
-    );
-    run.reject(
-        "a node matched to one of another kind",
-        rewrite("keep:a", cut(&[("X", "b")], &[]), evidence.clone()),
-    );
-    run.reject(
-        "a deletion leaving dangling edges",
-        rewrite("drop:b", cut(&[("X", "b")], &[]), evidence.clone()),
-    );
-    run.reject(
-        "a production outside the grammar",
-        rewrite("nope", MatchSpec::default(), evidence.clone()),
-    );
+    let mut redefined = EditSpec::default();
+    redefined
+        .add
+        .node_definitions
+        .push(node("a", &["n"], "c_any", Ingress::Any));
+    refuse(run, "a surviving node redefined", redefined);
+    let mut given_rule = EditSpec::default();
+    given_rule
+        .add
+        .transitions
+        .push(rule("b", &["run"], &["audit"]));
+    refuse(run, "a surviving node given a transition", given_rule);
+    let mut given_root = EditSpec::default();
+    given_root.add.roots.push(root("b", &["run"]));
+    refuse(run, "a surviving node given a root rule", given_root);
+    let mut relabelled = EditSpec::default();
+    relabelled
+        .add
+        .edge_definitions
+        .push(ab.with_contract("c_none").definition("ab"));
+    refuse(run, "a surviving edge redefined", relabelled);
+    let mut undefined = EditSpec::default();
+    undefined.add.nodes.push("n~1".to_owned());
+    refuse(run, "an added node without a definition", undefined);
+    let mut twice = EditSpec::default();
+    like("b").place(&mut twice.add, "n~1");
+    like("b").place(&mut twice.add, "n~1");
+    refuse(run, "one node added twice", twice);
+    let mut stranded = removing(&["x"], &["jx", "xx", "xa"]);
+    ab.connect(&mut stranded.add, "ax~1", "a", "x");
+    refuse(run, "an added edge ending at a removed node", stranded);
+    let mut nameless = EditSpec::default();
+    like("b").place(&mut nameless.add, "");
+    refuse(run, "an added node with an empty identity", nameless);
 
     // Identity rewrites.
     run.accept(
-        "the empty identity rewrite",
-        rewrite("nothing", MatchSpec::default(), evidence.clone()),
+        "the empty edit",
+        rewrite(EditSpec::default(), evidence.clone()),
     );
-    run.accept(
-        "an identity rewrite of a matched node",
-        rewrite("keep:a", cut(&[("X", "a")], &[]), evidence.clone()),
+    run.reject(
+        "the empty edit, asked by a principal the policy refuses",
+        rewrite_by(DENIED, EditSpec::default(), evidence.clone()),
     );
 
     // A stage inserted on the `All` receiver's route, then removed with its node.
+    let stage = |route: &str, node: &str, into: &str, onward: &str| {
+        let mut edit = removing(&[], &[route]);
+        like("j").place(&mut edit.add, node);
+        aj1.connect(&mut edit.add, into, "a", node);
+        aj1.connect(&mut edit.add, onward, node, "j");
+        edit
+    };
+    refuse(
+        run,
+        "one edge added twice",
+        stage("aj1", "z~1", "f~1", "f~1"),
+    );
     run.accept(
         "a stage inserted on a route into an All receiver",
-        rewrite(
-            "stage:aj1",
-            stage(&[("F", "f~1"), ("G", "g~1")]),
-            evidence.clone(),
-        ),
+        rewrite(stage("aj1", "z~1", "f~1", "g~1"), evidence.clone()),
     );
     assert!(
         run.state.retired().any(|(_, record)| record
@@ -1099,18 +885,11 @@ fn rewrite_prefix(run: &mut Run) {
         joined(&[received], b"r", vec![outbound("t", carry(), b"\x02A")]),
     );
     let [waiting_z] = outputs(consumed);
+    let mut unstage = removing(&["z~1"], &["f~1", "g~1"]);
+    aj1.connect(&mut unstage.add, "aj1~1", "a", "j");
     run.accept(
         "the staged node removed with both of its phases",
-        rewrite(
-            "unstage:aj1",
-            MatchSpec {
-                nodes: bind(&[("X", "a"), ("Y", "j"), ("Z", "z~1")]),
-                edges: bind(&[("F", "f~1"), ("G", "g~1")]),
-                fresh_nodes: Vec::new(),
-                fresh_edges: bind(&[("E", "aj1~1")]),
-            },
-            run.known_evidence(),
-        ),
+        rewrite(unstage, run.known_evidence()),
     );
     for package in [held, waiting_z] {
         assert_eq!(
@@ -1123,32 +902,37 @@ fn rewrite_prefix(run: &mut Run) {
         );
     }
     run.reject(
-        "a fresh node reusing a removed identity",
-        rewrite(
-            "stage:aj1",
-            MatchSpec {
-                nodes: bind(&[("X", "a"), ("Y", "j")]),
-                edges: bind(&[("E", "aj1~1")]),
-                fresh_nodes: bind(&[("Z", "z~1")]),
-                fresh_edges: bind(&[("F", "f~2"), ("G", "g~2")]),
-            },
-            run.known_evidence(),
-        ),
+        "an added node reusing a removed identity",
+        rewrite(stage("aj1~1", "z~1", "f~2", "g~2"), run.known_evidence()),
     );
     run.reject(
-        "a fresh edge reusing a removed identity",
-        rewrite("mend:ab", mend("f~1"), run.known_evidence()),
+        "an added edge reusing a removed identity",
+        rewrite(mend("f~1"), run.known_evidence()),
     );
 
-    // Extensions, and a production they enable.
-    let late = MatchSpec {
-        nodes: bind(&[("X", "a"), ("Y", "b")]),
-        fresh_edges: bind(&[("L", "late~1")]),
-        ..MatchSpec::default()
+    // An added node with its own root rule and authority transitions.
+    let mut spawned = EditSpec::default();
+    like("a").place(&mut spawned.add, "a~1");
+    run.accept(
+        "a node added with a root rule and authority transitions",
+        rewrite(spawned, run.known_evidence()),
+    );
+    let born = vec![outbound("t", to(&["audit"]), b"\x02A")];
+    run.accept(
+        "a root and a transition at the added node",
+        rooted("a~1", &["run"], born),
+    );
+
+    // Extensions, and an edit they enable.
+    let late = || {
+        let mut edit = EditSpec::default();
+        ab.with_contract("late")
+            .connect(&mut edit.add, "late~1", "a", "b");
+        edit
     };
     run.reject(
-        "a production naming an unregistered contract",
-        rewrite("mend-late", late.clone(), run.known_evidence()),
+        "an edit naming an unregistered contract",
+        rewrite(late(), run.known_evidence()),
     );
     let mut wider = run.definition.schema.clone();
     wider.tags.push("extra".to_owned());
@@ -1164,8 +948,8 @@ fn rewrite_prefix(run: &mut Run) {
         extend(wider.clone(), contracts.clone()),
     );
     run.accept(
-        "a production the extension enabled",
-        rewrite("mend-late", late, run.known_evidence()),
+        "an edit the extension enabled",
+        rewrite(late(), run.known_evidence()),
     );
     run.reject(
         "an extension adding nothing",
@@ -1197,16 +981,9 @@ fn rewrite_prefix(run: &mut Run) {
 
     // Plans: stale after an accepted change, current after a rejected op.
     let mend_plan = |run: &mut Run| {
-        let evidence = run.known_evidence();
-        rewrite(
-            "mend:aj1",
-            MatchSpec {
-                nodes: bind(&[("X", "a"), ("Y", "j")]),
-                fresh_edges: bind(&[("E", "aj~2")]),
-                ..MatchSpec::default()
-            },
-            evidence,
-        )
+        let mut edit = EditSpec::default();
+        aj1.connect(&mut edit.add, "aj~2", "a", "j");
+        rewrite(edit, run.known_evidence())
     };
     let op = mend_plan(run);
     let plan = run.plan(op).expect("the rewrite prepares");

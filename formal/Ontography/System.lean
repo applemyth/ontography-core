@@ -5,7 +5,8 @@ import Ontography.Rewrite
 
 A running workflow is a definition together with a state bound to it. Its transitions are
 the fixed-definition steps of `Step`, rewrites, and extensions; the last two replace the
-definition. The rewrite grammar is a trusted policy supplied with the workflow.
+definition. The rewrite policy is a trusted parameter supplied with the workflow, like the
+validators and the payload commitment.
 -/
 
 namespace Ontography
@@ -19,20 +20,19 @@ inductive SysOp where
 
 section
 
-variable (accepts : ContractId → Bytes → Bool) (H : Bytes → Digest)
-  (grammar : List Production)
+variable (accepts : ContractId → Bytes → Bool) (H : Bytes → Digest) (permits : Policy)
 
 /-- One transition of a running workflow `(Δ, S)`. -/
 def sysStep (Δ : Definition) (S : State) : SysOp → Option (Definition × State)
   | .step op => (step accepts H Δ S op).map ((Δ, ·))
-  | .rewrite req evidence => rewrite accepts H grammar Δ S req evidence
+  | .rewrite req evidence => rewrite accepts H permits Δ S req evidence
   | .extend schema contracts => extend Δ S schema contracts
 
 /-- Running workflows reachable from the empty state of an admitted definition. -/
 inductive SysReachable : Definition → State → Prop
   | initial {Δ : Definition} : Δ.Admitted → SysReachable Δ (State.initial Δ)
   | next {Δ Δ' : Definition} {S S' : State} (op : SysOp) :
-    SysReachable Δ S → sysStep accepts H grammar Δ S op = some (Δ', S') →
+    SysReachable Δ S → sysStep accepts H permits Δ S op = some (Δ', S') →
       SysReachable Δ' S'
 
 end

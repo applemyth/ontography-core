@@ -18,8 +18,8 @@ use thiserror::Error;
 
 use ontography_calculus::{
     Authority, AuthorityMatch, AuthorityTag, AuthorityTransitionRule, ContentDigest, Contract,
-    DefinitionError, DefinitionId, Edge, EdgeDefinition, Graph, IngressMode, Kernel, Node,
-    NodeDefinition, PackageId, Payload, RootRule, Schema,
+    DefinitionError, DefinitionId, DenyAll, Edge, EdgeDefinition, EditPolicy, Graph, IngressMode,
+    Kernel, Node, NodeDefinition, PackageId, Payload, RootRule, Schema,
 };
 use ontography_content::{ContentError, ContentId, ContentMetadata, ContentReader, ContentStore};
 use ontography_runtime::{
@@ -1059,7 +1059,7 @@ impl ApplicationBuilder {
         )?;
         Ok(Application {
             kernel: Arc::new(kernel),
-            grammar: ontography_calculus::RewriteGrammar::default(),
+            policy: Arc::new(DenyAll),
             root,
             bindings,
         })
@@ -1120,7 +1120,7 @@ impl ExecutableDefinition for BoundExecutable {
 /// Immutable compiled application plus its retained node launch behavior.
 pub struct Application {
     kernel: Arc<Kernel>,
-    grammar: ontography_calculus::RewriteGrammar,
+    policy: Arc<dyn EditPolicy>,
     root: RootRule,
     bindings: Vec<LaunchBinding>,
 }
@@ -1130,18 +1130,18 @@ impl fmt::Debug for Application {
         formatter
             .debug_struct("Application")
             .field("definition_id", &self.kernel.id())
-            .field("grammar", &self.grammar)
             .field("entry", &self.root.node_id())
             .field("bindings", &self.bindings.len())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
 impl Application {
-    /// Configures the graph productions permitted in this application's sessions.
+    /// Configures the policy that admits graph edits in this application's
+    /// sessions. Without one, sessions accept no graph edits.
     #[must_use]
-    pub fn with_grammar(mut self, grammar: ontography_calculus::RewriteGrammar) -> Self {
-        self.grammar = grammar;
+    pub fn with_policy(mut self, policy: Arc<dyn EditPolicy>) -> Self {
+        self.policy = policy;
         self
     }
 
@@ -1149,7 +1149,7 @@ impl Application {
     ///
     /// Existing contracts must share their validators with this application;
     /// graph structure, annotations, authority rules, and root rules must stay
-    /// identical. Retained executables and the configured grammar are preserved.
+    /// identical. Retained executables and the configured edit policy are preserved.
     /// This changes construction/resumption configuration, not any live session.
     /// Use [`SessionHandle::extend`] to extend a running session, persist the
     /// additions in the caller, and reconstruct this binding before resuming it.
@@ -1212,7 +1212,8 @@ impl Application {
     ) -> Result<RunningApplication, ApplicationStartError> {
         let state_root = absolute_path(state_root.as_ref())?;
         let run_path = reserve_run_path(&state_root)?;
-        let runtime = ProposalRuntime::with_grammar(Arc::clone(&self.kernel), self.grammar.clone());
+        let runtime =
+            ProposalRuntime::with_policy(Arc::clone(&self.kernel), Arc::clone(&self.policy));
         let session = runtime.create_persistent(&run_path)?;
         self.launch(
             runtime,
@@ -1234,7 +1235,8 @@ impl Application {
         &self,
         input: Payload,
     ) -> Result<RunningApplication, ApplicationStartError> {
-        let runtime = ProposalRuntime::with_grammar(Arc::clone(&self.kernel), self.grammar.clone());
+        let runtime =
+            ProposalRuntime::with_policy(Arc::clone(&self.kernel), Arc::clone(&self.policy));
         let session = runtime.open()?;
         self.launch(
             runtime,
@@ -1303,7 +1305,8 @@ impl Application {
         run_mode: ApplicationRunMode,
     ) -> Result<RunningApplication, ApplicationStartError> {
         let run_path = absolute_path(run_path)?;
-        let runtime = ProposalRuntime::with_grammar(Arc::clone(&self.kernel), self.grammar.clone());
+        let runtime =
+            ProposalRuntime::with_policy(Arc::clone(&self.kernel), Arc::clone(&self.policy));
         let session = runtime.open_persistent(&run_path)?;
         if session.status() != SessionStatus::Open {
             return Err(ApplicationStartError::NotResumable(session.status()));

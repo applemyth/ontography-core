@@ -1,8 +1,9 @@
 # Kernel traces for the Lean oracle
 
-A trace records one run of the kernel: the initial definition, the parameters
-the law takes for the whole run (the validators, the payload commitment `H`,
-and the rewrite grammar), and the operations in the order they ran. The Rust
+A trace records one run of the kernel: the initial definition, two of the
+parameters the law takes for the whole run (the validators and the payload
+commitment `H`), and the operations in the order they ran. The third
+parameter, the rewrite policy, is fixed by the format. The Rust
 test `tests/lean_oracle.rs` records traces and fills in the kernel's outcome
 after every operation. The Lean oracle (`Oracle/Main.lean`) replays a trace
 with the model's `sysStep`, threading the definition through rewrites and
@@ -16,9 +17,12 @@ cd formal && lake build oracle
 .lake/build/bin/oracle < trace.json
 ```
 
-This document is the format's specification. Version: `ontography-lean-trace/2`.
-Version 1 carried each contract's validator inside the contract and had no
-grammar, rewrites, or extensions.
+This document is the format's specification. Version: `ontography-lean-trace/3`.
+Version 2 carried a rewrite grammar in the header and wrote each rewrite as a
+production and a symbol match. Version 3 drops the grammar, writes each rewrite
+as a principal and an explicit edit, and fixes the rewrite policy. Version 1
+carried each contract's validator inside the contract and had no grammar,
+rewrites, or extensions.
 
 ## Encodings
 
@@ -29,7 +33,7 @@ grammar, rewrites, or extensions.
 | Bytes | Hexadecimal, two digits per byte. Traces are written lowercase; the oracle also reads uppercase in operations. |
 | Digest | The 64 lowercase hex digits of a `ContentDigest`. The model treats it as an opaque string. |
 | Authority | An array of tag strings. It denotes a set: in a trace, order and repeats carry no meaning. |
-| Identifier sets | Arrays of strings, likewise sets (node types, requirements, edge tags, edge types, interfaces). |
+| Identifier sets | Arrays of strings, likewise sets (node types, requirements, edge tags, edge types, removed identities). |
 
 ## Trace
 
@@ -37,13 +41,12 @@ A trace is one JSON object:
 
 | Field | Meaning |
 | --- | --- |
-| `format` | `"ontography-lean-trace/2"`. |
+| `format` | `"ontography-lean-trace/3"`. |
 | `name` | A name for reports. |
 | `seed` | Optional. The seed of a random run. |
 | `known_disagreement` | Optional. `{"step": n, "summary": text}` marks a trace whose first disagreement is at step `n`; see [Committed traces](#committed-traces). |
 | `validators` | The validator each contract identity names: the model's `accepts`. |
 | `digests` | The payload commitment `H`. |
-| `grammar` | The rewrite grammar: a list of productions. |
 | `definition` | The initial definition `Δ`. |
 | `ops` | The operations, in order. |
 
@@ -104,24 +107,14 @@ The definition must be one the kernel admits. The oracle does not check
 admission; the Rust test admits every definition with `Kernel::admit` before
 running it, so the model's `Admitted` hypotheses hold of every trace it writes.
 
-### Grammar
+### Rewrite policy
 
-Each production is `L ← K → R`, with `K` given by its node and edge symbols:
-
-```json
-{"id": "stage:ab",
- "left": {fragment},
- "interface_nodes": ["X", "Y"],
- "interface_edges": [],
- "right": {fragment}}
-```
-
-A fragment has the six graph fields of a definition (`nodes`, `edges`,
-`node_definitions`, `edge_definitions`, `transitions`, `roots`), naming
-rule-local symbols; it decodes to `Ontography.Fragment`. Every production must
-be one the kernel registers with `RewriteProduction::new`, and their
-identities must be distinct, as `RewriteGrammar::new` requires. The grammar is
-fixed for the run.
+Every trace runs under one policy, which both sides implement: the principal
+`"denied"` may make no edit, and every other principal may make any edit. The
+model's `permits p Δ e next retired` is `p ≠ "denied"` (`Oracle.policy`), and
+the Rust test gives the kernel an `EditPolicy` that denies exactly that
+principal. A trace exercises the policy guard by naming the principal of each
+rewrite.
 
 ### Operations
 
@@ -178,18 +171,25 @@ rejected by `apply` and by the model's `S.activations a = none` premise.
 `Kernel::prepare_rewrite` and `Kernel::commit_rewrite`:
 
 ```json
-{"op": "rewrite", "production": "stage:ab",
- "match": {"nodes": [["X", "a"], ["Y", "b"]], "edges": [["E", "ab"]],
-           "fresh_nodes": [["Z", "z1"]], "fresh_edges": [["F", "f1"], ["G", "g1"]]},
+{"op": "rewrite", "principal": "manager",
+ "edit": {"remove_nodes": ["b"], "remove_edges": ["ab", "bc"],
+          "add": {"nodes": ["z1"],
+                  "edges": [{"id": "f1", "source": "a", "target": "z1"}],
+                  "node_definitions": [...], "edge_definitions": [...],
+                  "transitions": [], "roots": []}},
  "evidence": {"<digest>": "6f6b"}}
 ```
 
-`match` holds the four bindings of `Ontography.Match` as `[symbol, identity]`
-pairs: `L`'s symbols to current identities, and those of `R ∖ K` to fresh
-ones. Each binding names a symbol at most once, since the kernel's
-`RewriteMatch` holds maps. `evidence` maps a digest to the bytes offered for
-it: the model's evidence list and the kernel's evidence map. The offered bytes
-need not match the digest; a mismatch is the kernel's and the model's to find.
+`principal` is the `RewriteRequest`'s principal, which only the policy reads.
+`edit` decodes to `Ontography.Edit` and the kernel's `GraphEdit`:
+`remove_nodes` and `remove_edges` name current identities, and the recorder
+writes each sorted and distinct, since the kernel holds them as sets; `add` is
+a fragment with the six graph fields of a definition (`nodes`, `edges`,
+`node_definitions`, `edge_definitions`, `transitions`, `roots`), naming the
+identities the edit allocates. An added edge may end at a surviving node as
+well as an added one. `evidence` maps a digest to the bytes offered for it: the
+model's evidence list and the kernel's evidence map. The offered bytes need not
+match the digest; a mismatch is the kernel's and the model's to find.
 
 **Extension**, `SysOp.extend schema contracts`, run through
 `Kernel::prepare_extension` and `Kernel::commit_extension`:
@@ -224,7 +224,7 @@ operation at the point of its commit.
 ## Oracle output
 
 The oracle starts from the trace's definition and `State.initial` of it, and
-applies `sysStep accepts H grammar` to each operation in turn. After each it
+applies `sysStep accepts H policy` to each operation in turn. After each it
 writes one line of JSON:
 
 ```json

@@ -1,8 +1,7 @@
 {
-  "format": "ontography-lean-trace/2",
+  "format": "ontography-lean-trace/3",
   "name": "outputs",
   "validators": {"any": "accept_all", "none": "reject_all", "ok": {"bytes_equal": "6f6b"}},
-  "grammar": [],
   "definition": {
     "schema": {"node_types": ["n"], "object_types": ["t", "u"], "tags": ["run", "audit", "admin"]},
     "contracts": [

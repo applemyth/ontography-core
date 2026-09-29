@@ -5,17 +5,37 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use ontography::{
-    ActivationId, ActivationProposal, ContentDigest, Emission, ExtensionError, Kernel,
-    OutputAuthority, PackageId, PackageRecord, Payload, PreparedExtension, PreparedRewrite,
-    RewriteError, RewriteGrammar, State,
+    ActivationId, ActivationProposal, ContentDigest, EditContext, EditPolicy, Emission,
+    ExtensionError, Kernel, OutputAuthority, PackageId, PackageRecord, Payload, PolicyDenial,
+    PreparedExtension, PreparedRewrite, RewriteError, State,
 };
 
 use crate::format::{
-    AuthoritySpec, Canonical, ContractSpec, DefinitionSpec, Destination, EmissionSpec, Expectation,
-    FORMAT, MatchSpec, ProductionSpec, Registry, SchemaSpec, Snapshot, Trace, TraceOp, TriggerSpec,
-    Validator, activation_text, admit, authority, extended, grammar, hex, package_ref,
-    parse_activation, parse_digest, parse_package, request, unhex,
+    AuthoritySpec, Canonical, ContractSpec, DefinitionSpec, Destination, EditSpec, EmissionSpec,
+    Expectation, FORMAT, FragmentSpec, Registry, SchemaSpec, Snapshot, Trace, TraceOp, TriggerSpec,
+    Validator, activation_text, admit, authority, extended, hex, package_ref, parse_activation,
+    parse_digest, parse_package, request, unhex,
 };
+
+/// The one principal the trace policy refuses.
+pub const DENIED: &str = "denied";
+
+/// The principal every other edit of the harness names.
+pub const MANAGER: &str = "manager";
+
+/// The policy of every trace, fixed on both sides: the model's
+/// `permits p _ _ _ _ := p ≠ "denied"`.
+pub struct TracePolicy;
+
+impl EditPolicy for TracePolicy {
+    fn permits(&self, context: &EditContext<'_>) -> Result<(), PolicyDenial> {
+        if context.principal.name() == DENIED {
+            Err(PolicyDenial::new("the trace policy refuses this principal"))
+        } else {
+            Ok(())
+        }
+    }
+}
 
 /// Where an activation's identity comes from.
 #[derive(Clone, Copy)]
@@ -95,9 +115,7 @@ pub struct Run {
     pub seed: Option<u64>,
     /// The initial definition.
     pub definition: DefinitionSpec,
-    pub productions: Vec<ProductionSpec>,
     pub registry: Registry,
-    pub grammar: RewriteGrammar,
     pub kernel: Arc<Kernel>,
     pub state: State,
     /// The ops as run, without expectations.
@@ -122,22 +140,18 @@ impl Run {
         name: String,
         seed: Option<u64>,
         definition: DefinitionSpec,
-        productions: Vec<ProductionSpec>,
         validators: BTreeMap<String, Validator>,
     ) -> Self {
         let mut registry = Registry::new(validators);
         let kernel = Arc::new(
             admit(&definition, &mut registry).expect("the kernel admits the trace definition"),
         );
-        let grammar = grammar(&productions);
         let state = kernel.empty_state();
         Self {
             name,
             seed,
             definition,
-            productions,
             registry,
-            grammar,
             kernel,
             state,
             ops: Vec::new(),
@@ -224,20 +238,17 @@ impl Run {
     fn prepare(&mut self, op: &TraceOp) -> Option<Prepared> {
         match op {
             TraceOp::Rewrite {
-                production,
-                matching,
+                principal,
+                edit,
                 evidence: offered,
                 ..
-            } => self
-                .kernel
-                .prepare_rewrite(
-                    &self.state,
-                    &self.grammar,
-                    &request(production, matching),
-                    &evidence(offered),
-                )
-                .ok()
-                .map(Prepared::Rewrite),
+            } => {
+                let request = request(principal, edit).ok()?;
+                self.kernel
+                    .prepare_rewrite(&self.state, &TracePolicy, &request, &evidence(offered))
+                    .ok()
+                    .map(Prepared::Rewrite)
+            }
             TraceOp::Extend {
                 schema, contracts, ..
             } => {
@@ -385,7 +396,6 @@ impl Run {
             known_disagreement: None,
             validators: self.registry.validators().clone(),
             digests: self.digests.clone(),
-            grammar: self.productions.clone(),
             definition: self.definition.clone(),
             ops: self.ops.clone(),
         }
@@ -513,14 +523,33 @@ pub fn retire(package: PackageId, evidence: Option<ActivationId>) -> TraceOp {
     }
 }
 
-pub fn rewrite(
-    production: &str,
-    matching: MatchSpec,
-    evidence: BTreeMap<String, String>,
-) -> TraceOp {
+/// Identities as the recorder writes a set: sorted, without repeats.
+pub fn sorted<'a>(ids: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    ids.into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// An edit removing `nodes` and `edges` and adding nothing yet.
+pub fn removing(nodes: &[&str], edges: &[&str]) -> EditSpec {
+    EditSpec {
+        remove_nodes: sorted(nodes.iter().copied()),
+        remove_edges: sorted(edges.iter().copied()),
+        add: FragmentSpec::default(),
+    }
+}
+
+/// An edit the manager asks for.
+pub fn rewrite(edit: EditSpec, evidence: BTreeMap<String, String>) -> TraceOp {
+    rewrite_by(MANAGER, edit, evidence)
+}
+
+pub fn rewrite_by(principal: &str, edit: EditSpec, evidence: BTreeMap<String, String>) -> TraceOp {
     TraceOp::Rewrite {
-        production: production.to_owned(),
-        matching,
+        principal: principal.to_owned(),
+        edit,
         evidence,
         expect: None,
     }
@@ -532,14 +561,6 @@ pub fn extend(schema: SchemaSpec, contracts: Vec<ContractSpec>) -> TraceOp {
         contracts,
         expect: None,
     }
-}
-
-/// Symbol bindings from `(symbol, identity)` pairs.
-pub fn bind(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
-    pairs
-        .iter()
-        .map(|(symbol, id)| ((*symbol).to_owned(), (*id).to_owned()))
-        .collect()
 }
 
 /// The evidence offering each payload under its own commitment.

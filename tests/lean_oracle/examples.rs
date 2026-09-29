@@ -1,17 +1,24 @@
-//! The six rewrite scenarios of `formal/Ontography/Examples.lean`, run on the
-//! kernel with the same definitions, productions, and matches. Each run
-//! requires the outcomes the model's `#guard`s state, so the kernel is pinned
-//! to them too, and each is replayed in the oracle like any other run.
+//! The rewrite scenarios of `formal/Ontography/Examples.lean`, run on the
+//! kernel with the same definitions and edits. Each run requires the outcomes
+//! the model's `#guard`s state, so the kernel is pinned to them too, and each
+//! is replayed in the oracle like any other run. A `#guard` evaluated from a
+//! fresh state becomes a run of its own, or a later step of one when the
+//! earlier steps were rejected and so left the state unchanged. Two guards
+//! cannot be traces: removing one node twice, since a kernel edit removes a
+//! set, and a policy other than the traces' fixed one.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use ontography::{PackageId, RetirementReason};
 
 use crate::format::{
-    ContractSpec, DefinitionSpec, EdgeDefinitionSpec, EdgeSpec, FragmentSpec, Ingress, Match,
-    MatchSpec, NodeSpec, ProductionSpec, RootSpec, SchemaSpec, Validator, hex,
+    ContractSpec, DefinitionSpec, EdgeDefinitionSpec, EdgeSpec, EditSpec, FragmentSpec, Ingress,
+    Match, NodeSpec, RootSpec, SchemaSpec, TransitionSpec, Validator, hex,
 };
-use crate::run::{Run, activate, bind, carry, delivered, offer, orig, outbound, outputs, rewrite};
+use crate::run::{
+    DENIED, Run, activate, carry, delivered, offer, orig, outbound, outputs, removing, rewrite,
+    rewrite_by, sorted,
+};
 
 const PAYLOAD: &[u8] = &[1, 2, 3];
 
@@ -95,55 +102,64 @@ fn kernel(nodes: &[&str], edges: &[(&str, &str, &str, &str)], all: &[&str]) -> D
     }
 }
 
-/// `Examples.rule`: a production from `left` to `right` with interface `K`,
-/// and the identity-symbol match of it.
-fn rule(
-    id: &str,
-    left: &DefinitionSpec,
-    right: &DefinitionSpec,
-    interface_nodes: &[&str],
-    interface_edges: &[&str],
-) -> (ProductionSpec, MatchSpec) {
-    let same = |ids: Vec<&String>| ids.into_iter().map(|id| (id.clone(), id.clone())).collect();
-    let kept: BTreeSet<&str> = interface_nodes.iter().copied().collect();
-    let kept_edges: BTreeSet<&str> = interface_edges.iter().copied().collect();
-    let matching = MatchSpec {
-        nodes: same(left.nodes.iter().collect()),
-        edges: same(left.edges.iter().map(|edge| &edge.id).collect()),
-        fresh_nodes: same(
-            right
-                .nodes
-                .iter()
-                .filter(|node| !kept.contains(node.as_str()))
-                .collect(),
-        ),
-        fresh_edges: same(
-            right
+/// `Examples.diff`: the edit taking `before` to `after`, removing the nodes
+/// and edges `after` lacks and adding the ones `before` lacks with their
+/// annotations and policies in `after`.
+fn diff(before: &DefinitionSpec, after: &DefinitionSpec) -> EditSpec {
+    let node_ids = |definition: &DefinitionSpec| -> BTreeSet<String> {
+        definition.nodes.iter().cloned().collect()
+    };
+    let edge_ids = |definition: &DefinitionSpec| -> BTreeSet<String> {
+        definition
+            .edges
+            .iter()
+            .map(|edge| edge.id.clone())
+            .collect()
+    };
+    let (old_nodes, new_nodes) = (node_ids(before), node_ids(after));
+    let (old_edges, new_edges) = (edge_ids(before), edge_ids(after));
+    let added = |id: &String| !old_nodes.contains(id);
+    EditSpec {
+        remove_nodes: sorted(old_nodes.difference(&new_nodes).map(String::as_str)),
+        remove_edges: sorted(old_edges.difference(&new_edges).map(String::as_str)),
+        add: FragmentSpec {
+            nodes: after.nodes.iter().filter(|id| added(id)).cloned().collect(),
+            edges: after
                 .edges
                 .iter()
-                .map(|edge| &edge.id)
-                .filter(|edge| !kept_edges.contains(edge.as_str()))
+                .filter(|edge| !old_edges.contains(&edge.id))
+                .cloned()
                 .collect(),
-        ),
-    };
-    let production = ProductionSpec {
-        id: id.to_owned(),
-        left: left.fragment(),
-        interface_nodes: interface_nodes.iter().map(|id| (*id).to_owned()).collect(),
-        interface_edges: interface_edges.iter().map(|id| (*id).to_owned()).collect(),
-        right: right.fragment(),
-    };
-    (production, matching)
+            node_definitions: after
+                .node_definitions
+                .iter()
+                .filter(|definition| added(&definition.node))
+                .cloned()
+                .collect(),
+            edge_definitions: after
+                .edge_definitions
+                .iter()
+                .filter(|definition| !old_edges.contains(&definition.edge))
+                .cloned()
+                .collect(),
+            transitions: after
+                .transitions
+                .iter()
+                .filter(|rule| added(&rule.node))
+                .cloned()
+                .collect(),
+            roots: after
+                .roots
+                .iter()
+                .filter(|root| added(&root.node))
+                .cloned()
+                .collect(),
+        },
+    }
 }
 
-fn start(name: &str, definition: DefinitionSpec, grammar: Vec<ProductionSpec>) -> Run {
-    Run::new(
-        format!("examples-{name}"),
-        None,
-        definition,
-        grammar,
-        validators(),
-    )
+fn start(name: &str, definition: DefinitionSpec) -> Run {
+    Run::new(format!("examples-{name}"), None, definition, validators())
 }
 
 /// `Examples.delivered`: a root at the edge's source delivering the payload.
@@ -221,13 +237,12 @@ fn routes(all: bool) -> Run {
     let receivers: &[&str] = if all { &["B"] } else { &[] };
     let line = kernel(&["A", "B"], &[("ab", "A", "B", "payload")], receivers);
     let bare = kernel(&["A", "B"], &[], receivers);
-    let (production, matching) = rule("disconnect", &line, &bare, &["A", "B"], &[]);
     let name = if all { "route-all" } else { "route-any" };
-    let mut run = start(name, line, vec![production]);
+    let mut run = start(name, line.clone());
     let receipt = deliver(&mut run, "A", "ab");
     run.accept(
         "the route disconnected",
-        rewrite("disconnect", matching, BTreeMap::new()),
+        rewrite(diff(&line, &bare), BTreeMap::new()),
     );
     let fate = all.then_some((RetirementReason::RouteRemoved, 2));
     assert_outcome(&run, &["A", "B"], &[], &[(receipt, fate)], 2);
@@ -238,14 +253,12 @@ fn routes(all: bool) -> Run {
 fn deletion() -> Run {
     let line = kernel(&["A", "B"], &[("ab", "A", "B", "payload")], &[]);
     let just_a = kernel(&["A"], &[], &[]);
-    let (remove, removal) = rule("remove-b", &line, &just_a, &["A"], &[]);
-    let (recreate, recreation) = rule("recreate-b", &just_a, &line, &["A"], &[]);
-    let mut run = start("delete", line, vec![remove, recreate]);
+    let mut run = start("delete", line.clone());
     let received = deliver(&mut run, "A", "ab");
     let waiting = wait(&mut run, "B");
     run.accept(
         "B deleted with both phases",
-        rewrite("remove-b", removal, BTreeMap::new()),
+        rewrite(diff(&line, &just_a), BTreeMap::new()),
     );
     let removed = Some((RetirementReason::HolderRemoved, 3));
     assert_outcome(
@@ -257,114 +270,128 @@ fn deletion() -> Run {
     );
     run.reject(
         "B recreated under its used identity",
-        rewrite("recreate-b", recreation, offer(&[PAYLOAD])),
+        rewrite(diff(&just_a, &line), offer(&[PAYLOAD])),
     );
     run
 }
 
-/// A deleted node may not keep an unmatched incident edge.
+/// A removed node takes every edge at it with it.
 fn dangling() -> Run {
-    let host = kernel(
+    let fork = kernel(
         &["A", "B", "U"],
         &[("ab", "A", "B", "payload"), ("ub", "U", "B", "payload")],
         &[],
     );
-    let line = kernel(&["A", "B"], &[("ab", "A", "B", "payload")], &[]);
-    let just_a = kernel(&["A"], &[], &[]);
-    let (production, matching) = rule("dangling", &line, &just_a, &["A"], &[]);
-    let mut run = start("dangling", host, vec![production]);
+    let mut run = start("dangling", fork);
     run.reject(
-        "a deletion leaving ub dangling",
-        rewrite("dangling", matching, offer(&[PAYLOAD])),
+        "B removed leaving ub dangling",
+        rewrite(removing(&["B"], &["ab"]), BTreeMap::new()),
     );
+    run.accept(
+        "B removed with every edge at it",
+        rewrite(removing(&["B"], &["ab", "ub"]), BTreeMap::new()),
+    );
+    assert_outcome(&run, &["A", "U"], &[], &[], 1);
     run
 }
 
-/// A preserved node keeps its local policy.
-fn policy() -> Run {
+/// A surviving node keeps its definition and policies: an edit may give an
+/// authority transition or a root rule only to a node it adds.
+fn survivor() -> Vec<Run> {
     let just_a = kernel(&["A"], &[], &[]);
-    let rootless = FragmentSpec {
-        roots: Vec::new(),
-        ..just_a.fragment()
-    };
-    let production = |id: &str, right: FragmentSpec| ProductionSpec {
-        id: id.to_owned(),
-        left: just_a.fragment(),
-        interface_nodes: vec!["A".to_owned()],
-        interface_edges: Vec::new(),
-        right,
-    };
-    let grammar = vec![
-        production("policy-drop-root", rootless),
-        production("policy-keep", just_a.fragment()),
-    ];
-    let mut run = start("policy", just_a, grammar);
-    let matching = MatchSpec {
-        nodes: bind(&[("A", "A")]),
-        ..MatchSpec::default()
-    };
+    let mut run = start("survivor", just_a.clone());
+    let mut given_rule = EditSpec::default();
+    given_rule.add.transitions.push(TransitionSpec {
+        node: "A".to_owned(),
+        source: vec!["run".to_owned()],
+        target: vec!["other".to_owned()],
+    });
     run.reject(
-        "a preserved node losing its root rule",
-        rewrite("policy-drop-root", matching.clone(), offer(&[PAYLOAD])),
+        "a surviving node given a transition",
+        rewrite(given_rule, BTreeMap::new()),
     );
     run.accept(
-        "a preserved node keeping its policy",
-        rewrite("policy-keep", matching, offer(&[PAYLOAD])),
+        "the empty edit",
+        rewrite(EditSpec::default(), BTreeMap::new()),
     );
     assert_outcome(&run, &["A"], &[], &[], 1);
-    run
+    let rootless = DefinitionSpec {
+        roots: Vec::new(),
+        ..just_a
+    };
+    let mut unrooted = start("survivor-root", rootless);
+    let mut given_root = EditSpec::default();
+    given_root.add.roots.push(RootSpec {
+        node: "A".to_owned(),
+        ceiling: vec!["run".to_owned()],
+    });
+    unrooted.reject(
+        "a surviving node given a root rule",
+        rewrite(given_root, BTreeMap::new()),
+    );
+    vec![run, unrooted]
 }
 
-/// Rule symbols bind exactly, injectively, and to fresh identities.
-fn symbols() -> Run {
-    let pattern = kernel(&["X", "Y"], &[("xy", "X", "Y", "payload")], &[]);
-    let staged = kernel(
-        &["X", "Y", "Z"],
-        &[("xz", "X", "Z", "payload"), ("zy", "Z", "Y", "payload")],
+/// An edit removes current identities and allocates only unused ones.
+fn identities() -> Vec<Run> {
+    let line = kernel(&["A", "B"], &[("ab", "A", "B", "payload")], &[]);
+    let inserted = kernel(
+        &["A", "B", "C"],
+        &[("ac", "A", "C", "payload"), ("cb", "C", "B", "payload")],
         &[],
     );
-    let (production, _) = rule("symbols", &pattern, &staged, &["X", "Y"], &[]);
-    let line = kernel(&["A", "B"], &[("ab", "A", "B", "payload")], &[]);
-    let mut run = start("symbols", line, vec![production]);
-    let symbol_match = |nodes: &[(&str, &str)], fresh: &[(&str, &str)]| MatchSpec {
-        nodes: bind(nodes),
-        edges: bind(&[("xy", "ab")]),
-        fresh_nodes: bind(fresh),
-        fresh_edges: bind(&[("xz", "ac"), ("zy", "cb")]),
-    };
-    for (why, nodes, fresh) in [
-        ("a match missing Y", &[("X", "A")][..], &[("Z", "C")][..]),
-        (
-            "a non-injective match",
-            &[("X", "A"), ("Y", "A")],
-            &[("Z", "C")],
-        ),
-        (
-            "a fresh node reusing B",
-            &[("X", "A"), ("Y", "B")],
-            &[("Z", "B")],
-        ),
-    ] {
-        run.reject(
-            why,
-            rewrite("symbols", symbol_match(nodes, fresh), BTreeMap::new()),
-        );
-    }
-    run.accept(
-        "an exact, injective, fresh match",
-        rewrite(
-            "symbols",
-            symbol_match(&[("X", "A"), ("Y", "B")], &[("Z", "C")]),
-            BTreeMap::new(),
-        ),
+    let mut insert = start("insert", line.clone());
+    insert.accept(
+        "C inserted on the route",
+        rewrite(diff(&line, &inserted), BTreeMap::new()),
     );
     assert_outcome(
-        &run,
+        &insert,
         &["A", "B", "C"],
         &[("ac", "A", "C"), ("cb", "C", "B")],
         &[],
         1,
     );
+    // Replace `ab` by a reversed edge named `id`.
+    let reverse = |id: &str| {
+        let reversed = kernel(&["A", "B"], &[(id, "B", "A", "payload")], &[]);
+        let mut edit = removing(&[], &["ab"]);
+        edit.add.edges = reversed.edges;
+        edit.add.edge_definitions = reversed.edge_definitions;
+        edit
+    };
+    let mut run = start("reverse", line);
+    run.reject(
+        "an edge identity reallocated by the edit removing it",
+        rewrite(reverse("ab"), BTreeMap::new()),
+    );
+    run.reject(
+        "removing a node the graph lacks",
+        rewrite(removing(&["C"], &[]), BTreeMap::new()),
+    );
+    run.accept(
+        "ab replaced by a reversed edge",
+        rewrite(reverse("ba"), BTreeMap::new()),
+    );
+    assert_outcome(&run, &["A", "B"], &[("ba", "B", "A")], &[], 1);
+    vec![insert, run]
+}
+
+/// The policy sees the principal: the one the traces' policy refuses may not
+/// make an edit the manager may.
+fn policy() -> Run {
+    let pair = kernel(&["A", "B"], &[], &[]);
+    let line = kernel(&["A", "B"], &[("ab", "A", "B", "payload")], &[]);
+    let mut run = start("policy", pair.clone());
+    run.reject(
+        "an edit asked by the refused principal",
+        rewrite_by(DENIED, diff(&pair, &line), BTreeMap::new()),
+    );
+    run.accept(
+        "the same edit asked by the manager",
+        rewrite(diff(&pair, &line), BTreeMap::new()),
+    );
+    assert_outcome(&run, &["A", "B"], &[("ab", "A", "B")], &[], 1);
     run
 }
 
@@ -375,38 +402,32 @@ fn symbols() -> Run {
 /// decides whether `A`'s package retires.
 fn commutation(source: &str, accept_first: bool) -> Run {
     let square = kernel(&["A", "B", "C", "D"], &[], &[]);
-    let (accept, accepting) = rule(
-        "accept",
+    let accepting = diff(
         &square,
         &kernel(&["A", "B", "C", "D"], &[("ab", "A", "B", "payload")], &[]),
-        &["A", "B", "C", "D"],
-        &[],
     );
-    let (reject, rejecting) = rule(
-        "reject",
+    let rejecting = diff(
         &square,
         &kernel(
             &["A", "B", "C", "D"],
             &[("reject", source, "D", "deny")],
             &[],
         ),
-        &["A", "B", "C", "D"],
-        &[],
     );
     let name = format!(
         "commute-{}-{}-first",
         if source == "C" { "disjoint" } else { "overlap" },
         if accept_first { "accept" } else { "reject" }
     );
-    let mut run = start(&name, square, vec![accept, reject]);
+    let mut run = start(&name, square);
     let at_a = wait(&mut run, "A");
     let at_c = wait(&mut run, "C");
     let mut steps = vec![("accept", accepting), ("reject", rejecting)];
     if !accept_first {
         steps.reverse();
     }
-    for (production, matching) in steps {
-        run.accept(production, rewrite(production, matching, offer(&[PAYLOAD])));
+    for (why, edit) in steps {
+        run.accept(why, rewrite(edit, offer(&[PAYLOAD])));
     }
     let retired = |revision| Some((RetirementReason::NoAcceptingEdge, revision));
     let fates = match (source, accept_first) {
@@ -425,8 +446,8 @@ fn commutation(source: &str, accept_first: bool) -> Run {
     run
 }
 
-/// Every scenario of `Examples.lean`, with the commutation pair from both
-/// sources and in both orders.
+/// Every scenario of `Examples.lean` a trace can express, with the
+/// commutation pair from both sources and in both orders.
 pub fn runs() -> Vec<Run> {
     let mut runs = vec![
         routes(true),
@@ -434,8 +455,9 @@ pub fn runs() -> Vec<Run> {
         deletion(),
         dangling(),
         policy(),
-        symbols(),
     ];
+    runs.extend(survivor());
+    runs.extend(identities());
     for source in ["C", "A"] {
         for accept_first in [true, false] {
             runs.push(commutation(source, accept_first));

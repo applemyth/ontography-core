@@ -4,12 +4,12 @@ import Ontography.System
 /-!
 # Trace decoding
 
-A trace (`TRACE_FORMAT.md`) carries the three parameters of a running workflow's law, which
-stay fixed for the whole run: the validator each contract identity names (`accepts`), the
-payload commitment computed by the kernel (`H`), and the rewrite grammar. It also carries the
-initial definition and the operations to replay. Decoding turns them into the model's
-`Definition`, `Production`, and `SysOp` values. It checks only the trace's own
-well-formedness, never a premise of the law.
+A trace (`TRACE_FORMAT.md`) carries two of the parameters of a running workflow's law, which
+stay fixed for the whole run: the validator each contract identity names (`accepts`) and the
+payload commitment computed by the kernel (`H`). The third, the rewrite policy, is fixed by
+the format itself (`policy`). A trace also carries the initial definition and the operations
+to replay. Decoding turns them into the model's `Definition` and `SysOp` values. It checks
+only the trace's own well-formedness, never a premise of the law.
 -/
 
 namespace Oracle
@@ -38,7 +38,6 @@ structure Trace where
   validators : List (ContractId × Validator)
   /-- The kernel's commitment of each payload, keyed by the payload's lowercase hex. -/
   digests : List (String × Digest)
-  grammar : List Production
   definition : Definition
   ops : List SysOp
 
@@ -54,7 +53,12 @@ payload an operation carries has an entry. -/
 def Trace.commit (t : Trace) (payload : Bytes) : Digest :=
   (t.digests.lookup (hexOfBytes payload)).getD ""
 
-/-! ## Definitions and productions -/
+/-- The rewrite policy of every trace: every principal but `"denied"` may make any edit. The
+kernel test applies the same policy, so the oracle exercises both outcomes of the policy
+guard. -/
+def policy : Policy := fun principal _ _ _ _ => principal != "denied"
+
+/-! ## Definitions and edits -/
 
 def decodeValidator (j : Json) : Except String Validator := do
   match ← variant j with
@@ -116,7 +120,7 @@ def decodeTransition (j : Json) : Except String TransitionRule := do
 def decodeRoot (j : Json) : Except String RootRule := do
   return ⟨← string (← field j "node"), ← strings (← field j "ceiling")⟩
 
-/-- The graph and annotations shared by a definition and a production side. -/
+/-- The graph and annotations shared by a definition and an edit's added fragment. -/
 def decodeFragment (j : Json) : Except String Fragment := do
   return {
     nodes := ← within "nodes" (strings (← field j "nodes"))
@@ -141,15 +145,12 @@ def decodeDefinition (j : Json) : Except String Definition := do
     transitions := F.transitions
     roots := F.roots }
 
-def decodeProduction (j : Json) : Except String Production := do
-  let id ← string (← field j "id")
-  within s!"production {id}" do
-    return {
-      id
-      left := ← within "left" (decodeFragment (← field j "left"))
-      interfaceNodes := ← strings (← field j "interface_nodes")
-      interfaceEdges := ← strings (← field j "interface_edges")
-      right := ← within "right" (decodeFragment (← field j "right")) }
+/-- An edit: the nodes and edges it removes, and the fragment it adds. -/
+def decodeEdit (j : Json) : Except String Edit := do
+  return {
+    removeNodes := ← within "remove_nodes" (strings (← field j "remove_nodes"))
+    removeEdges := ← within "remove_edges" (strings (← field j "remove_edges"))
+    add := ← within "add" (decodeFragment (← field j "add")) }
 
 /-! ## Operations -/
 
@@ -178,20 +179,6 @@ def decodeEmission (j : Json) : Except String Emission := do
     | ("transition", target) => pure (OutputAuthority.transition (← strings target))
     | (tag, _) => throw s!"unknown output authority \"{tag}\""
   return ⟨destination, authority, ← bytesOfHex (← string (← field j "payload"))⟩
-
-/-- Symbol bindings `[[symbol, identity], ...]`. -/
-def decodeBindings (j : Json) : Except String (List (String × String)) := do
-  (← array j).mapM fun pair => do
-    match ← array pair with
-    | [symbol, identity] => return (← string symbol, ← string identity)
-    | _ => throw s!"expected a binding [symbol, identity], found {pair.compress}"
-
-def decodeMatch (j : Json) : Except String Match := do
-  return {
-    nodes := ← within "nodes" (decodeBindings (← field j "nodes"))
-    edges := ← within "edges" (decodeBindings (← field j "edges"))
-    freshNodes := ← within "fresh_nodes" (decodeBindings (← field j "fresh_nodes"))
-    freshEdges := ← within "fresh_edges" (decodeBindings (← field j "fresh_edges")) }
 
 /-- Payload evidence `{digest: bytes}`: the bytes offered for each commitment. -/
 def decodeEvidence (j : Json) : Except String (List (Digest × Bytes)) := do
@@ -222,10 +209,10 @@ def decodeOp (j : Json) : Except String SysOp := do
       | a => pure (some (← decodeActivationId a))
     return .step (.retire (← decodePackageId (← field j "package")) evidence)
   | "rewrite" =>
-    let production ← string (← field j "production")
-    let matching ← within "match" (decodeMatch (← field j "match"))
+    let principal ← string (← field j "principal")
+    let edit ← within "edit" (decodeEdit (← field j "edit"))
     let evidence ← within "evidence" (decodeEvidence (← field j "evidence"))
-    return .rewrite ⟨production, matching⟩ evidence
+    return .rewrite ⟨principal, edit⟩ evidence
   | "extend" =>
     let schema ← within "schema" (decodeSchema (← field j "schema"))
     let contracts ← within "contracts" do (← array (← field j "contracts")).mapM decodeContract
@@ -248,7 +235,7 @@ def opContracts : SysOp → List Contract
 
 /-! ## Trace -/
 
-def traceFormat : String := "ontography-lean-trace/2"
+def traceFormat : String := "ontography-lean-trace/3"
 
 def decodeDigests (j : Json) : Except String (List (String × Digest)) := do
   match j with
@@ -267,7 +254,6 @@ def decodeTrace (input : String) : Except String Trace := do
     throw s!"unsupported trace format \"{format}\", expected \"{traceFormat}\""
   let validators ← within "validators" (decodeValidators (← field j "validators"))
   let digests ← within "digests" (decodeDigests (← field j "digests"))
-  let grammar ← within "grammar" do (← array (← field j "grammar")).mapM decodeProduction
   let definition ← within "definition" (decodeDefinition (← field j "definition"))
   let ops ← (← array (← field j "ops")).zipIdx.mapM fun (op, i) => within s!"op {i}" (decodeOp op)
   for c in definition.contracts do
@@ -280,6 +266,6 @@ def decodeTrace (input : String) : Except String Trace := do
     for c in opContracts op do
       if (validators.lookup c.id).isNone then
         throw s!"op {i}: contract {c.id} has no validator"
-  return { validators, digests, grammar, definition, ops }
+  return { validators, digests, definition, ops }
 
 end Oracle

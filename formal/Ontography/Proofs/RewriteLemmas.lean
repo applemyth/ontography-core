@@ -1,6 +1,7 @@
 import Ontography.System
 import Ontography.Proofs.Basic
 import Ontography.Proofs.ActivationLemmas
+import Ontography.Proofs.Structural
 
 /-!
 # Lemmas for rewriting
@@ -133,19 +134,11 @@ structure StructuralSpec (Δ : Definition) (S : State) (rep : Replacement) : Pro
   freshEdges : ∀ e ∈ rep.freshEdges, e.id ∉ S.usedEdges
 
 /-- An admitted structural step satisfies `StructuralSpec`. -/
-theorem structural_spec {Δ : Definition} {S : State} {pr : Production} {m : Match}
-    {rep : Replacement} (h : structural? Δ S pr m = some rep) : StructuralSpec Δ S rep := by
-  simp only [structural?, bind, Option.bind_eq_some_iff, guard_eq_some, exists_const,
-    Option.pure_def, Option.some.injEq] at h
-  obtain ⟨-, -, -, -, -, -, -, -, -, -, -, -, -, hfreshN, hfreshE, -, hadm, rfl⟩ := h
-  refine ⟨hadm, rfl, rfl, ⟨_, List.filter_sublist.subset, rfl⟩, ?_, ?_⟩
-  · intro v hv
-    obtain ⟨b, hb, rfl⟩ := List.mem_map.1 hv
-    exact hfreshN b hb
-  · intro e he
-    obtain ⟨b, hb, he⟩ := List.mem_filterMap.1 he
-    obtain ⟨re, -, rfl⟩ := Option.map_eq_some_iff.1 he
-    exact hfreshE b hb
+theorem structural_spec {Δ : Definition} {S : State} {e : Edit} {rep : Replacement}
+    (h : structuralEdit? Δ S e = some rep) : StructuralSpec Δ S rep := by
+  obtain ⟨hv, rfl⟩ := Structural.structuralEdit?_eq_some.1 h
+  exact ⟨hv.admitted, rfl, rfl, ⟨_, List.filter_sublist.subset, rfl⟩, hv.freshNodes,
+    hv.freshEdges⟩
 
 /-! ## Holders -/
 

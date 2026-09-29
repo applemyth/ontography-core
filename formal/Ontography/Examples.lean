@@ -3,11 +3,11 @@ import Ontography.System
 /-!
 # Examples
 
-Kernel regression tests from `tests/frontier_rewrite.rs`, replayed in the model. Each
-`#guard` evaluates the model when this file builds, so a change to the law that alters one of
-these outcomes fails the build. The fixtures mirror the tests' shared support: every node has
-type `n`, result contract `result`, and a root rule with authority `{run}`; edges carry
-contract `payload`, `deny`, or `other`.
+Kernel rewrite regression scenarios, replayed in the model. Each `#guard` evaluates the model
+when this file builds, so a change to the law that alters one of these outcomes fails the
+build. The fixtures mirror the kernel tests' shared support: every node has type `n`, result
+contract `result`, and a root rule with authority `{run}`; edges carry contract `payload`,
+`deny`, or `other`.
 -/
 
 namespace Ontography.Examples
@@ -35,16 +35,21 @@ def kernel (nodes : List NodeId) (edges : List (EdgeId × NodeId × NodeId × Co
   transitions := []
   roots := nodes.map fun v => ⟨v, ["run"]⟩
 
-def fragment (Δ : Definition) : Fragment :=
-  ⟨Δ.nodes, Δ.edges, Δ.nodeDefs, Δ.edgeDefs, Δ.transitions, Δ.roots⟩
+def nothing : Fragment := ⟨[], [], [], [], [], []⟩
 
-/-- A production from `L` to `R` with interface `K`, and the identity-symbol match of it. -/
-def rule (id : String) (L R : Definition) (kn : List NodeId) (ke : List EdgeId) :
-    Production × RewriteRequest :=
-  (⟨id, fragment L, kn, ke, fragment R⟩,
-    ⟨id, ⟨L.nodes.map fun v => (v, v), L.edges.map fun e => (e.id, e.id),
-      (R.nodes.filter (· ∉ kn)).map fun v => (v, v),
-      ((R.edges.map (·.id)).filter (· ∉ ke)).map fun e => (e, e)⟩⟩)
+/-- The edit taking `Δ` to `Δ'`: remove the nodes and edges `Δ'` lacks, and add the ones `Δ`
+lacks with their annotations and policies in `Δ'`. -/
+def diff (Δ Δ' : Definition) : Edit :=
+  let nodes := Δ'.nodes.filter (· ∉ Δ.nodes)
+  let edges := Δ'.edges.filter (·.id ∉ Δ.edges.map (·.id))
+  { removeNodes := Δ.nodes.filter (· ∉ Δ'.nodes)
+    removeEdges := (Δ.edges.map (·.id)).filter (· ∉ Δ'.edges.map (·.id))
+    add := ⟨nodes, edges, Δ'.nodeDefs.filter (·.node ∈ nodes),
+      Δ'.edgeDefs.filter (·.edge ∈ edges.map (·.id)), Δ'.transitions.filter (·.node ∈ nodes),
+      Δ'.roots.filter (·.node ∈ nodes)⟩ }
+
+/-- Every edit is permitted. -/
+def permitAll : Policy := fun _ _ _ _ _ => true
 
 def run (Δ : Definition) (S : State) (op : Op) : State :=
   (step accepts commit Δ S op).getD S
@@ -59,11 +64,14 @@ def delivered (Δ : Definition) (S : State) (a : ActivationId) (e : EdgeId) : St
   | none => S
 
 /-- The outcome of a rewrite: its nodes, its edges, the statuses of `ps`, and the revision. -/
-def outcome (grammar : List Production) (Δ : Definition) (S : State) (req : RewriteRequest)
+def outcome (permits : Policy) (Δ : Definition) (S : State) (req : RewriteRequest)
     (ev : List (Digest × Bytes)) (ps : List PackageId) :
     Option (List NodeId × List Edge × List (Option Status) × Nat) :=
-  (rewrite accepts commit grammar Δ S req ev).map fun (Δ', S') =>
+  (rewrite accepts commit permits Δ S req ev).map fun (Δ', S') =>
     (Δ'.nodes, Δ'.edges, ps.map fun p => (S'.packages p).map (·.status), S'.revision)
+
+/-- A request by the manager. -/
+def manager (e : Edit) : RewriteRequest := ⟨"manager", e⟩
 
 def retired (reason : Reason) (revision : Nat) : Option Status :=
   some (.retired ⟨reason, revision, none⟩)
@@ -74,79 +82,112 @@ def allAt (b : NodeId) : NodeId → Ingress := fun v => if v == b then .all else
 
 #guard
   let Δ := kernel ["A", "B"] [("ab", "A", "B", "payload")] (allAt "B")
-  let (pr, req) := rule "disconnect" Δ (kernel ["A", "B"] [] (allAt "B")) ["A", "B"] []
-  outcome [pr] Δ (delivered Δ (State.initial Δ) 1 "ab") req [] [⟨1, 0⟩] =
+  outcome permitAll Δ (delivered Δ (State.initial Δ) 1 "ab")
+      (manager (diff Δ (kernel ["A", "B"] [] (allAt "B")))) [] [⟨1, 0⟩] =
     some (["A", "B"], [], [retired .routeRemoved 2], 2)
 
 #guard
   let Δ := kernel ["A", "B"] [("ab", "A", "B", "payload")]
-  let (pr, req) := rule "disconnect" Δ (kernel ["A", "B"] []) ["A", "B"] []
-  outcome [pr] Δ (delivered Δ (State.initial Δ) 1 "ab") req [] [⟨1, 0⟩] =
+  outcome permitAll Δ (delivered Δ (State.initial Δ) 1 "ab")
+      (manager (diff Δ (kernel ["A", "B"] []))) [] [⟨1, 0⟩] =
     some (["A", "B"], [], [some .live], 2)
 
 /-! ## Deleting a node retires both phases, and its identity cannot be reused -/
 
 #guard
   let Δ := kernel ["A", "B"] [("ab", "A", "B", "payload")]
-  let A := kernel ["A"] []
-  let grammar := [(rule "remove-b" Δ A ["A"] []).1, (rule "recreate-b" A Δ ["A"] []).1]
   let S := outbound Δ (delivered Δ (State.initial Δ) 1 "ab") 2 "B"
-  outcome grammar Δ S (rule "remove-b" Δ A ["A"] []).2 [] [⟨1, 0⟩, ⟨2, 0⟩] =
+  outcome permitAll Δ S (manager (diff Δ (kernel ["A"] []))) [] [⟨1, 0⟩, ⟨2, 0⟩] =
     some (["A"], [], [retired .holderRemoved 3, retired .holderRemoved 3], 3)
 
 #guard
   let Δ := kernel ["A", "B"] [("ab", "A", "B", "payload")]
   let A := kernel ["A"] []
-  let grammar := [(rule "remove-b" Δ A ["A"] []).1, (rule "recreate-b" A Δ ["A"] []).1]
   let S := outbound Δ (delivered Δ (State.initial Δ) 1 "ab") 2 "B"
-  ((rewrite accepts commit grammar Δ S (rule "remove-b" Δ A ["A"] []).2 []).bind fun (Δ', S') =>
-    rewrite accepts commit grammar Δ' S' (rule "recreate-b" A Δ ["A"] []).2 evidence).isNone
+  ((rewrite accepts commit permitAll Δ S (manager (diff Δ A)) []).bind fun (Δ', S') =>
+    rewrite accepts commit permitAll Δ' S' (manager (diff A Δ)) evidence).isNone
 
-/-! ## A deleted node may not keep an unmatched incident edge -/
+/-! ## A removed node takes every edge at it with it -/
 
-#guard
-  let Δ := kernel ["A", "B", "U"] [("ab", "A", "B", "payload"), ("ub", "U", "B", "payload")]
-  let (pr, req) :=
-    rule "dangling" (kernel ["A", "B"] [("ab", "A", "B", "payload")]) (kernel ["A"] []) ["A"] []
-  (outcome [pr] Δ (State.initial Δ) req evidence []).isNone
+def fork : Definition :=
+  kernel ["A", "B", "U"] [("ab", "A", "B", "payload"), ("ub", "U", "B", "payload")]
 
-/-! ## A preserved node keeps its local policy -/
+#guard (outcome permitAll fork (State.initial fork) (manager ⟨["B"], ["ab"], nothing⟩) [] []).isNone
 
-#guard
-  let Δ := kernel ["A"] []
-  let pr : Production := ⟨"policy", fragment Δ, ["A"], [], { fragment Δ with roots := [] }⟩
-  let req : RewriteRequest := ⟨"policy", ⟨[("A", "A")], [], [], []⟩⟩
-  (outcome [pr] Δ (State.initial Δ) req evidence []).isNone
+#guard outcome permitAll fork (State.initial fork) (manager ⟨["B"], ["ab", "ub"], nothing⟩) [] [] =
+  some (["A", "U"], [], [], 1)
+
+/-! ## A surviving node keeps its definition and policies -/
 
 #guard
   let Δ := kernel ["A"] []
-  let pr : Production := ⟨"policy", fragment Δ, ["A"], [], fragment Δ⟩
-  let req : RewriteRequest := ⟨"policy", ⟨[("A", "A")], [], [], []⟩⟩
-  outcome [pr] Δ (State.initial Δ) req evidence [] = some (["A"], [], [], 1)
+  (outcome permitAll Δ (State.initial Δ)
+    (manager ⟨[], [], { nothing with transitions := [⟨"A", ["run"], ["other"]⟩] }⟩) [] []).isNone
 
-/-! ## Rule symbols bind exactly, injectively, and to fresh identities -/
+#guard
+  let Δ := { kernel ["A"] [] with roots := [] }
+  (outcome permitAll Δ (State.initial Δ)
+    (manager ⟨[], [], { nothing with roots := [⟨"A", ["run"]⟩] }⟩) [] []).isNone
 
-def symbols : Production :=
-  ⟨"symbols", fragment (kernel ["X", "Y"] [("xy", "X", "Y", "payload")]), ["X", "Y"], [],
-    fragment (kernel ["X", "Y", "Z"] [("xz", "X", "Z", "payload"), ("zy", "Z", "Y", "payload")])⟩
+#guard
+  let Δ := kernel ["A"] []
+  outcome permitAll Δ (State.initial Δ) (manager ⟨[], [], nothing⟩) [] [] =
+    some (["A"], [], [], 1)
 
-def symbolMatch (nodes fresh : List (String × String)) : RewriteRequest :=
-  ⟨"symbols", ⟨nodes, [("xy", "ab")], fresh, [("xz", "ac"), ("zy", "cb")]⟩⟩
+/-! ## An edit removes current identities and allocates only unused ones -/
 
 def line : Definition := kernel ["A", "B"] [("ab", "A", "B", "payload")]
 
-#guard outcome [symbols] line (State.initial line)
-    (symbolMatch [("X", "A"), ("Y", "B")] [("Z", "C")]) [] [] =
+def inserted : Definition :=
+  kernel ["A", "B", "C"] [("ac", "A", "C", "payload"), ("cb", "C", "B", "payload")]
+
+#guard outcome permitAll line (State.initial line) (manager (diff line inserted)) [] [] =
   some (["A", "B", "C"], [⟨"ac", "A", "C"⟩, ⟨"cb", "C", "B"⟩], [], 1)
 
-#guard (outcome [symbols] line (State.initial line)
-    (symbolMatch [("X", "A")] [("Z", "C")]) [] []).isNone
+/-- Replace `ab` by a reversed edge named `id`. -/
+def reverse (id : EdgeId) : Edit :=
+  ⟨[], ["ab"], { nothing with
+    edges := [⟨id, "B", "A"⟩]
+    edgeDefs := [⟨id, ["flow"], ["n"], ["n"], "payload", ["run"], .anyOf⟩] }⟩
 
-#guard (outcome [symbols] line (State.initial line)
-    (symbolMatch [("X", "A"), ("Y", "A")] [("Z", "C")]) [] []).isNone
+#guard outcome permitAll line (State.initial line) (manager (reverse "ba")) [] [] =
+  some (["A", "B"], [⟨"ba", "B", "A"⟩], [], 1)
 
-#guard (outcome [symbols] line (State.initial line)
-    (symbolMatch [("X", "A"), ("Y", "B")] [("Z", "B")]) [] []).isNone
+-- An edge identity leaves with its edge and is never reallocated, even by the same edit.
+#guard (outcome permitAll line (State.initial line) (manager (reverse "ab")) [] []).isNone
+
+#guard (outcome permitAll line (State.initial line)
+    (manager ⟨["C"], [], nothing⟩) [] []).isNone
+
+#guard (outcome permitAll line (State.initial line)
+    (manager ⟨["A", "A"], [], nothing⟩) [] []).isNone
+
+/-! ## The policy sees the principal, the edit, and the retirements its cleanup makes -/
+
+def deny (who : Principal) : Policy := fun p _ _ _ _ => p != who
+
+def retiresNothing : Policy := fun _ _ _ _ retired => retired.isEmpty
+
+#guard
+  let Δ := kernel ["A", "B"] []
+  (rewrite accepts commit (deny "worker") Δ (State.initial Δ)
+    ⟨"worker", diff Δ line⟩ []).isNone
+
+#guard
+  let Δ := kernel ["A", "B"] []
+  outcome (deny "worker") Δ (State.initial Δ) (manager (diff Δ line)) [] [] =
+    some (["A", "B"], [⟨"ab", "A", "B"⟩], [], 1)
+
+#guard
+  let Δ := kernel ["A", "B"] [("ab", "A", "B", "payload")] (allAt "B")
+  (outcome retiresNothing Δ (delivered Δ (State.initial Δ) 1 "ab")
+    (manager (diff Δ (kernel ["A", "B"] [] (allAt "B")))) [] [⟨1, 0⟩]).isNone
+
+#guard
+  let Δ := kernel ["A", "B"] [("ab", "A", "B", "payload")]
+  outcome retiresNothing Δ (delivered Δ (State.initial Δ) 1 "ab")
+      (manager (diff Δ (kernel ["A", "B"] []))) [] [⟨1, 0⟩] =
+    some (["A", "B"], [], [some .live], 2)
 
 /-! ## Commutation needs disjoint affected holders
 
@@ -161,13 +202,11 @@ def waiting : State := outbound square (outbound square (State.initial square) 1
 
 def twoRewrites (source : NodeId) (acceptFirst : Bool) :
     Option (List Edge × List (Option Status)) :=
-  let accept := rule "accept" square (kernel ["A", "B", "C", "D"] [("ab", "A", "B", "payload")])
-    ["A", "B", "C", "D"] []
-  let reject := rule "reject" square (kernel ["A", "B", "C", "D"] [("reject", source, "D", "deny")])
-    ["A", "B", "C", "D"] []
-  let (first, second) := if acceptFirst then (accept.2, reject.2) else (reject.2, accept.2)
-  (rewrite accepts commit [accept.1, reject.1] square waiting first evidence).bind fun (Δ, S) =>
-    (rewrite accepts commit [accept.1, reject.1] Δ S second evidence).map fun (Δ', S') =>
+  let accept := diff square (kernel ["A", "B", "C", "D"] [("ab", "A", "B", "payload")])
+  let reject := diff square (kernel ["A", "B", "C", "D"] [("reject", source, "D", "deny")])
+  let (first, second) := if acceptFirst then (accept, reject) else (reject, accept)
+  (rewrite accepts commit permitAll square waiting (manager first) evidence).bind fun (Δ, S) =>
+    (rewrite accepts commit permitAll Δ S (manager second) evidence).map fun (Δ', S') =>
       (Δ'.edges, [⟨1, 0⟩, ⟨2, 0⟩].map fun (p : PackageId) => (S'.packages p).map (·.status))
 
 #guard twoRewrites "C" true =

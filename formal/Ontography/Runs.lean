@@ -12,14 +12,13 @@ namespace Ontography
 
 section
 
-variable (accepts : ContractId → Bytes → Bool) (H : Bytes → Digest)
-  (grammar : List Production)
+variable (accepts : ContractId → Bytes → Bool) (H : Bytes → Digest) (permits : Policy)
 
 /-- `(Δ', S')` follows `(Δ, S)` by zero or more transitions. -/
 inductive SysSteps : Definition → State → Definition → State → Prop
   | refl {Δ : Definition} {S : State} : SysSteps Δ S Δ S
   | tail {Δ Δ₁ Δ₂ : Definition} {S S₁ S₂ : State} (op : SysOp) :
-    SysSteps Δ S Δ₁ S₁ → sysStep accepts H grammar Δ₁ S₁ op = some (Δ₂, S₂) →
+    SysSteps Δ S Δ₁ S₁ → sysStep accepts H permits Δ₁ S₁ op = some (Δ₂, S₂) →
       SysSteps Δ S Δ₂ S₂
 
 end

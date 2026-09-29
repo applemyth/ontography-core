@@ -1,7 +1,7 @@
 //! Every direct prepare/commit pair fences its predecessor before admission,
 //! and every evaluator refuses a state whose revision cannot advance.
 use ontography::{
-    ActivationProposal, ExtensionError, Kernel, Reject, RetireError, RewriteError, RewriteGrammar,
+    ActivationProposal, ExtensionError, Kernel, PermitAll, Reject, RetireError, RewriteError,
     Schema, TransferError,
 };
 use std::sync::Arc;
@@ -33,12 +33,11 @@ fn extended(k: &Kernel) -> Arc<Kernel> {
 fn definition_changes_make_every_prepared_operation_stale() {
     let k = support::kernel(&["A", "B"], &[("ab", "A", "B", "payload")]);
     let next = support::kernel(&["A", "B"], &[]);
-    let (rule, request) = support::rule("remove", &k, &next, &["A", "B"], &[]);
-    let grammar = RewriteGrammar::new([rule]).unwrap();
+    let remove = support::request(support::replace(&k, &next, &["A", "B"], &[]));
     let mut state = k.empty_state();
     let package = support::outbound(&k, &mut state, "A");
     let rewrite = k
-        .prepare_rewrite(&state, &grammar, &request, &support::evidence())
+        .prepare_rewrite(&state, &PermitAll, &remove, &support::evidence())
         .unwrap();
     let transfer = k
         .prepare_transfer(&state, package, "ab", &support::payload())
@@ -67,7 +66,7 @@ fn definition_changes_make_every_prepared_operation_stale() {
 #[test]
 fn an_exhausted_revision_rejects_every_transition_kind() {
     let k = support::kernel(&["A", "B"], &[("ab", "A", "B", "payload")]);
-    let (grammar, request) = support::normalization();
+    let identity = support::normalization();
     let mut state = k.empty_state();
     let package = support::outbound(&k, &mut state, "A");
     let mut checkpoint = state.checkpoint();
@@ -88,7 +87,7 @@ fn an_exhausted_revision_rejects_every_transition_kind() {
         Err(RetireError::Admission(RewriteError::RevisionExhausted))
     ));
     assert!(matches!(
-        k.prepare_rewrite(&state, &grammar, &request, &support::evidence()),
+        k.prepare_rewrite(&state, &PermitAll, &identity, &support::evidence()),
         Err(RewriteError::RevisionExhausted)
     ));
     assert!(matches!(
@@ -103,11 +102,14 @@ fn rewrite_cannot_replace_validators_with_a_matching_fingerprint() {
     let k = support::kernel(&["A"], &[]);
     let foreign = support::kernel(&["A"], &[]);
     assert_eq!(k.fingerprint(), foreign.fingerprint());
-    let (rule, request) = support::rule("identity", &foreign, &foreign, &["A"], &[]);
-    let grammar = RewriteGrammar::new([rule]).unwrap();
     let mut state = k.empty_state();
     let plan = foreign
-        .prepare_rewrite(&state, &grammar, &request, &support::evidence())
+        .prepare_rewrite(
+            &state,
+            &PermitAll,
+            &support::normalization(),
+            &support::evidence(),
+        )
         .unwrap();
     let before = state.clone();
     assert!(matches!(

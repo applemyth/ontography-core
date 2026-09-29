@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 use ontography::{
     ActivationProposal, ApplicationBuilder, ApplicationError, Authority, AuthorityTag, Contract,
-    DefinitionError, DefinitionId, Edge, EdgeDefinition, Emission, Graph, IngressMode, Kernel,
-    Node, NodeComponent, NodeConfig, NodeDefinition, OutputAuthority, PackageId, Phase, Reject,
-    RetirementReason, RewriteFragment, RewriteGrammar, RewriteMatch, RewriteProduction,
-    RewriteRequest, RootRule, Schema,
+    DefinitionError, DefinitionId, Edge, EdgeDefinition, Emission, Graph, GraphEdit, GraphFragment,
+    IngressMode, Kernel, Node, NodeComponent, NodeConfig, NodeDefinition, OutputAuthority,
+    PackageId, PermitAll, Phase, Principal, Reject, RetirementReason, RewriteRequest, RootRule,
+    Schema,
 };
 
 fn bytes(value: &'static [u8]) -> Arc<[u8]> {
@@ -71,38 +71,33 @@ fn root_outbound(kernel: &Kernel, state: &mut ontography::State) -> PackageId {
     PackageId::from_parts(kernel.activate(state, proposal).unwrap(), 0)
 }
 
-fn rewrite(
-    old: &Kernel,
-    new: &Kernel,
-    old_edge: Option<&str>,
-    new_edge: Option<&str>,
-) -> (RewriteGrammar, RewriteRequest) {
-    let production = RewriteProduction::new(
-        "replace-route",
-        RewriteFragment::from_kernel(old),
-        BTreeSet::from([Arc::from("a"), Arc::from("b")]),
-        BTreeSet::new(),
-        RewriteFragment::from_kernel(new),
+/// The edit that removes the route `removed` between `a` and `b` and adds
+/// `new`'s route `added` with its annotation, keeping both nodes.
+fn replace_route(new: &Kernel, removed: Option<&str>, added: Option<&str>) -> RewriteRequest {
+    let (edges, definitions) = added
+        .map(|id| {
+            (
+                new.graph().edge(id).unwrap().clone(),
+                new.edge_definition(id).unwrap().clone(),
+            )
+        })
+        .into_iter()
+        .unzip();
+    RewriteRequest::new(
+        Principal::new("probe"),
+        GraphEdit::new(
+            BTreeSet::new(),
+            removed.into_iter().map(Arc::from).collect(),
+            GraphFragment::new(
+                Vec::new(),
+                edges,
+                Vec::new(),
+                definitions,
+                Vec::new(),
+                Vec::new(),
+            ),
+        ),
     )
-    .unwrap();
-    let grammar = RewriteGrammar::new([production]).unwrap();
-    let nodes = BTreeMap::from([
-        (Arc::from("a"), Arc::from("a")),
-        (Arc::from("b"), Arc::from("b")),
-    ]);
-    let edges = old_edge
-        .into_iter()
-        .map(|id| (Arc::from(id), Arc::from(id)))
-        .collect();
-    let fresh_edges = new_edge
-        .into_iter()
-        .map(|id| (Arc::from(id), Arc::from(id)))
-        .collect();
-    let request = RewriteRequest::new(
-        "replace-route",
-        RewriteMatch::new(nodes, edges, BTreeMap::new(), fresh_edges),
-    );
-    (grammar, request)
 }
 
 #[test]
@@ -112,9 +107,9 @@ fn identity_graph_rewrite_retains_unroutable_outbound_work() {
     let package = root_outbound(&kernel, &mut state);
     assert_eq!(state.position(package).unwrap().phase(), Phase::Out);
 
-    let (grammar, request) = rewrite(&kernel, &kernel, None, None);
+    let request = replace_route(&kernel, None, None);
     let prepared = kernel
-        .prepare_rewrite(&state, &grammar, &request, &BTreeMap::new())
+        .prepare_rewrite(&state, &PermitAll, &request, &BTreeMap::new())
         .unwrap();
     assert!(prepared.retirements().is_empty());
     let history = state.activations().clone();
@@ -133,9 +128,9 @@ fn changing_the_holders_outgoing_edges_rechecks_outbound_work() {
     let mut state = kernel.empty_state();
     let package = root_outbound(&kernel, &mut state);
 
-    let (grammar, request) = rewrite(&kernel, &rejecting, None, Some("e1"));
+    let request = replace_route(&rejecting, None, Some("e1"));
     let prepared = kernel
-        .prepare_rewrite(&state, &grammar, &request, &BTreeMap::new())
+        .prepare_rewrite(&state, &PermitAll, &request, &BTreeMap::new())
         .unwrap();
     assert_eq!(
         prepared.retirements().get(&package),
@@ -162,10 +157,10 @@ fn replacing_an_all_join_edge_retires_the_stranded_receipt() {
         .unwrap();
     old.commit_transfer(&mut state, prepared_transfer).unwrap();
 
-    let (grammar, request) = rewrite(&old, &new, Some("e1"), Some("e2"));
+    let request = replace_route(&new, Some("e1"), Some("e2"));
     let evidence = BTreeMap::new();
     let prepared = old
-        .prepare_rewrite(&state, &grammar, &request, &evidence)
+        .prepare_rewrite(&state, &PermitAll, &request, &evidence)
         .unwrap();
     assert_eq!(
         prepared.retirements().get(&package),
@@ -203,9 +198,9 @@ fn surviving_any_receiver_keeps_its_receipt_after_route_replacement() {
         .unwrap();
     old.commit_transfer(&mut state, prepared_transfer).unwrap();
 
-    let (grammar, request) = rewrite(&old, &new, Some("e1"), Some("e2"));
+    let request = replace_route(&new, Some("e1"), Some("e2"));
     let prepared = old
-        .prepare_rewrite(&state, &grammar, &request, &BTreeMap::new())
+        .prepare_rewrite(&state, &PermitAll, &request, &BTreeMap::new())
         .unwrap();
     assert!(prepared.retirements().is_empty());
     let next = old.commit_rewrite(&mut state, prepared).unwrap();
@@ -222,7 +217,7 @@ fn surviving_any_receiver_keeps_its_receipt_after_route_replacement() {
 fn transfer_before_route_deletion_changes_work_survival() {
     let old = tagged_kernel(Some("e1"), IngressMode::Any);
     let no_route = tagged_kernel(None, IngressMode::Any);
-    let (grammar, request) = rewrite(&old, &no_route, Some("e1"), None);
+    let request = replace_route(&no_route, Some("e1"), None);
 
     let mut delivered_first = old.empty_state();
     let delivered = root_outbound(&old, &mut delivered_first);
@@ -231,7 +226,7 @@ fn transfer_before_route_deletion_changes_work_survival() {
         .unwrap();
     old.commit_transfer(&mut delivered_first, transfer).unwrap();
     let plan = old
-        .prepare_rewrite(&delivered_first, &grammar, &request, &BTreeMap::new())
+        .prepare_rewrite(&delivered_first, &PermitAll, &request, &BTreeMap::new())
         .unwrap();
     assert!(plan.retirements().is_empty());
     let after_delivery = old.commit_rewrite(&mut delivered_first, plan).unwrap();
@@ -243,7 +238,7 @@ fn transfer_before_route_deletion_changes_work_survival() {
     let mut deleted_first = old.empty_state();
     let outbound = root_outbound(&old, &mut deleted_first);
     let plan = old
-        .prepare_rewrite(&deleted_first, &grammar, &request, &BTreeMap::new())
+        .prepare_rewrite(&deleted_first, &PermitAll, &request, &BTreeMap::new())
         .unwrap();
     assert_eq!(
         plan.retirements().get(&outbound),

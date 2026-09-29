@@ -1,8 +1,7 @@
 {
-  "format": "ontography-lean-trace/2",
+  "format": "ontography-lean-trace/3",
   "name": "identities",
   "validators": {"any": "accept_all"},
-  "grammar": [],
   "definition": {
     "schema": {"node_types": ["n"], "object_types": ["t"], "tags": ["run"]},
     "contracts": [{"id": "any", "object_type": "t"}],

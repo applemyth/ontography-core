@@ -1,11 +1,12 @@
 //! Rewrite fixtures shared by the ported calculus suites: a five-contract
-//! vocabulary, root-driven package births, and identity-symbol productions.
+//! vocabulary, root-driven package births, and graph edits described as a
+//! subgraph replaced around a preserved interface.
 
 use ontography::{
     ActivationProposal, Authority, AuthorityTag, ContentDigest, Contract, ContractViolation,
-    DefinitionId, Edge, EdgeDefinition, Emission, Graph, Kernel, Node, NodeDefinition,
-    OutputAuthority, PackageId, Payload, RewriteFragment, RewriteGrammar, RewriteMatch,
-    RewriteProduction, RewriteRequest, RootRule, Schema, State,
+    DefinitionId, Edge, EdgeDefinition, Emission, Graph, GraphEdit, GraphFragment, Kernel, Node,
+    NodeDefinition, OutputAuthority, PackageId, Payload, Principal, RewriteRequest, RootRule,
+    Schema, State,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -24,12 +25,6 @@ pub fn evidence() -> BTreeMap<ContentDigest, Payload> {
 }
 pub fn names(items: &[&str]) -> BTreeSet<Arc<str>> {
     items.iter().map(|id| Arc::from(*id)).collect()
-}
-pub fn bindings(items: &[&str]) -> BTreeMap<Arc<str>, Arc<str>> {
-    items
-        .iter()
-        .map(|id| (Arc::from(*id), Arc::from(*id)))
-        .collect()
 }
 
 pub fn kernel(nodes: &[&str], edges: &[(&str, &str, &str, &str)]) -> Kernel {
@@ -113,56 +108,82 @@ pub fn delivered(kernel: &Kernel, state: &mut State, edge: &str) -> PackageId {
         .unwrap()
 }
 
-pub fn rule(
-    id: &str,
+/// The edit that replaces the host subgraph `left` by `right`, keeping the
+/// named interface: `left`'s other elements are removed, and `right`'s other
+/// elements are added with their definitions, roots, and transitions. Both
+/// sides use the host's own identities.
+pub fn replace(
     left: &Kernel,
     right: &Kernel,
     interface_nodes: &[&str],
     interface_edges: &[&str],
-) -> (RewriteProduction, RewriteRequest) {
-    let interface_nodes = names(interface_nodes);
-    let interface_edges = names(interface_edges);
-    let matching = RewriteMatch::new(
+) -> GraphEdit {
+    let kept_nodes = names(interface_nodes);
+    let kept_edges = names(interface_edges);
+    let added_node = |id: &str| !kept_nodes.contains(id);
+    let added_edge = |id: &str| !kept_edges.contains(id);
+    GraphEdit::new(
         left.graph()
             .nodes()
             .iter()
-            .map(|node| (Arc::from(node.id()), Arc::from(node.id())))
+            .map(|node| Arc::from(node.id()))
+            .filter(|id: &Arc<str>| added_node(id))
             .collect(),
         left.graph()
             .edges()
             .iter()
-            .map(|edge| (Arc::from(edge.id()), Arc::from(edge.id())))
+            .map(Edge::id_arc)
+            .filter(|id: &Arc<str>| added_edge(id))
             .collect(),
-        right
-            .graph()
-            .nodes()
-            .iter()
-            .filter(|node| !interface_nodes.contains(node.id()))
-            .map(|node| (Arc::from(node.id()), Arc::from(node.id())))
-            .collect(),
-        right
-            .graph()
-            .edges()
-            .iter()
-            .filter(|edge| !interface_edges.contains(edge.id()))
-            .map(|edge| (Arc::from(edge.id()), Arc::from(edge.id())))
-            .collect(),
-    );
-    (
-        RewriteProduction::new(
-            id,
-            RewriteFragment::from_kernel(left),
-            interface_nodes,
-            interface_edges,
-            RewriteFragment::from_kernel(right),
-        )
-        .unwrap(),
-        RewriteRequest::new(id, matching),
+        GraphFragment::new(
+            right
+                .graph()
+                .nodes()
+                .iter()
+                .filter(|node| added_node(node.id()))
+                .cloned()
+                .collect(),
+            right
+                .graph()
+                .edges()
+                .iter()
+                .filter(|edge| added_edge(edge.id()))
+                .cloned()
+                .collect(),
+            right
+                .node_definitions()
+                .iter()
+                .filter(|definition| added_node(definition.node_id()))
+                .cloned()
+                .collect(),
+            right
+                .edge_definitions()
+                .iter()
+                .filter(|definition| added_edge(definition.edge_id()))
+                .cloned()
+                .collect(),
+            right
+                .authority_transitions()
+                .iter()
+                .filter(|rule| added_node(rule.node_id()))
+                .cloned()
+                .collect(),
+            right
+                .roots()
+                .iter()
+                .filter(|root| added_node(root.node_id()))
+                .cloned()
+                .collect(),
+        ),
     )
 }
 
-pub fn normalization() -> (RewriteGrammar, RewriteRequest) {
-    let empty = kernel(&[], &[]);
-    let (production, request) = rule("normalize", &empty, &empty, &[], &[]);
-    (RewriteGrammar::new([production]).unwrap(), request)
+/// A request from the suites' single principal.
+pub fn request(edit: GraphEdit) -> RewriteRequest {
+    RewriteRequest::new(Principal::new("test"), edit)
+}
+
+/// The identity rewrite: nothing removed, nothing added.
+pub fn normalization() -> RewriteRequest {
+    request(GraphEdit::default())
 }

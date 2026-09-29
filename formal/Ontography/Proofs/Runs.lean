@@ -22,7 +22,7 @@ first guard admits `a` only while it is not accepted.
 namespace Ontography.Proofs.Runs
 
 variable {accepts : ContractId → Bytes → Bool} {H : Bytes → Digest}
-  {grammar : List Production} {Δ Δ' : Definition} {S S' : State}
+  {permits : Policy} {Δ Δ' : Definition} {S S' : State}
 
 /-- Induction over a run: a property that every transition from a well-formed state preserves
 holds at the end of a run from an admitted, well-formed workflow where it holds, as do
@@ -30,8 +30,8 @@ admission and well-formedness. -/
 theorem sysSteps_invariant {P : Definition → State → Prop} (hΔ : Δ.Admitted) (hS : WF Δ S)
     (hP : P Δ S)
     (hstep : ∀ {Δ₁ Δ₂ : Definition} {S₁ S₂ : State} {op : SysOp}, WF Δ₁ S₁ → P Δ₁ S₁ →
-      sysStep accepts H grammar Δ₁ S₁ op = some (Δ₂, S₂) → P Δ₂ S₂)
-    (h : SysSteps accepts H grammar Δ S Δ' S') : Δ'.Admitted ∧ WF Δ' S' ∧ P Δ' S' := by
+      sysStep accepts H permits Δ₁ S₁ op = some (Δ₂, S₂) → P Δ₂ S₂)
+    (h : SysSteps accepts H permits Δ S Δ' S') : Δ'.Admitted ∧ WF Δ' S' ∧ P Δ' S' := by
   induction h with
   | refl => exact ⟨hΔ, hS, hP⟩
   | tail _ _ hop ih =>
@@ -66,11 +66,11 @@ theorem Frame.trans {S₁ S₂ S₃ : State} (h₁₂ : Frame S₁ S₂) (h₂�
 
 /-- A rewrite records no package that was not recorded. -/
 theorem rewrite_absent {req : RewriteRequest} {evidence : List (Digest × Bytes)}
-    (h : rewrite accepts H grammar Δ S req evidence = some (Δ', S')) {q : PackageId}
+    (h : rewrite accepts H permits Δ S req evidence = some (Δ', S')) {q : PackageId}
     (hq : S.packages q = none) : S'.packages q = none := by
   simp only [rewrite, bind, Option.bind_eq_some_iff, Common.guard_eq_some, exists_const,
     Option.pure_def, Option.some.injEq, Prod.mk.injEq] at h
-  obtain ⟨-, pr, -, rep, -, fates, -, rfl, rfl⟩ := h
+  obtain ⟨rep, -, fates, -, -, rfl, rfl⟩ := h
   dsimp only
   rw [hq]
   split <;> rfl
@@ -80,13 +80,13 @@ end Ontography.Proofs.Runs
 namespace Ontography.Proofs
 
 variable {accepts : ContractId → Bytes → Bool} {H : Bytes → Digest}
-  {grammar : List Production} {Δ Δ' : Definition} {S S' : State}
+  {permits : Policy} {Δ Δ' : Definition} {S S' : State}
 
 /-- Everything a transition may not change, it never changes across a run: accepted
 activations, each package's immutable facts, deliveries once made, settled statuses, and the
 lifetime records, which only grow. -/
 theorem sysSteps_frame (hΔ : Δ.Admitted) (hS : WF Δ S)
-    (h : SysSteps accepts H grammar Δ S Δ' S') : Frame S S' :=
+    (h : SysSteps accepts H permits Δ S Δ' S') : Frame S S' :=
   (Runs.sysSteps_invariant (P := fun _ S₁ => Frame S S₁) hΔ hS (Runs.Frame.refl S)
     (fun hS₁ hF hop => Runs.Frame.trans hF (Ontography.sysStep_frame hS₁ hop)) h).2.2
 
@@ -102,7 +102,7 @@ theorem accepted_not_reaccepted {a : ActivationId} (ha : S.activations a ≠ non
 
 /-- A package identity is born only with its producing activation, when that activation is
 accepted; together with `sysSteps_frame`, no package identity is born twice. -/
-theorem sysStep_newborn {op : SysOp} (h : sysStep accepts H grammar Δ S op = some (Δ', S'))
+theorem sysStep_newborn {op : SysOp} (h : sysStep accepts H permits Δ S op = some (Δ', S'))
     {p : PackageId} {r : PackageRecord} (hnone : S.packages p = none)
     (hsome : S'.packages p = some r) :
     S.activations p.producer = none ∧ S'.activations p.producer ≠ none := by
@@ -144,13 +144,13 @@ theorem sysStep_newborn {op : SysOp} (h : sysStep accepts H grammar Δ S op = so
 
 /-- An accepted activation is never replaced, so no activation identity is accepted twice. -/
 theorem activation_persists (hΔ : Δ.Admitted) (hS : WF Δ S)
-    (h : SysSteps accepts H grammar Δ S Δ' S') {a : ActivationId} {act : Activation}
+    (h : SysSteps accepts H permits Δ S Δ' S') {a : ActivationId} {act : Activation}
     (ha : S.activations a = some act) : S'.activations a = some act :=
   (sysSteps_frame hΔ hS h).activations a act ha
 
 /-- A node identity that has left the definition never returns to it. -/
 theorem removed_node_never_returns (hΔ : Δ.Admitted) (hS : WF Δ S)
-    (h : SysSteps accepts H grammar Δ S Δ' S') {v : NodeId} (hused : v ∈ S.usedNodes)
+    (h : SysSteps accepts H permits Δ S Δ' S') {v : NodeId} (hused : v ∈ S.usedNodes)
     (hgone : v ∉ Δ.nodes) : v ∉ Δ'.nodes :=
   (Runs.sysSteps_invariant (P := fun Δ₁ S₁ => v ∈ S₁.usedNodes ∧ v ∉ Δ₁.nodes) hΔ hS
     ⟨hused, hgone⟩
@@ -161,7 +161,7 @@ theorem removed_node_never_returns (hΔ : Δ.Admitted) (hS : WF Δ S)
 
 /-- An edge identity that has left the definition never returns to it. -/
 theorem removed_edge_never_returns (hΔ : Δ.Admitted) (hS : WF Δ S)
-    (h : SysSteps accepts H grammar Δ S Δ' S') {e : EdgeId} (hused : e ∈ S.usedEdges)
+    (h : SysSteps accepts H permits Δ S Δ' S') {e : EdgeId} (hused : e ∈ S.usedEdges)
     (hgone : e ∉ Δ.edges.map (·.id)) : e ∉ Δ'.edges.map (·.id) := by
   refine (Runs.sysSteps_invariant
     (P := fun Δ₁ S₁ => e ∈ S₁.usedEdges ∧ e ∉ Δ₁.edges.map (·.id)) hΔ hS ⟨hused, hgone⟩

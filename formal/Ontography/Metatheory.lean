@@ -24,12 +24,12 @@ namespace Ontography
 
 section
 variable {accepts : ContractId → Bytes → Bool} {H : Bytes → Digest}
-  {grammar : List Production} {Δ Δ' : Definition} {S S' : State}
+  {permits : Policy} {Δ Δ' : Definition} {S S' : State}
 
 /-- Locality: a rewrite changes only live packages whose holder it affects. -/
 theorem rewrite_local (hΔ : Δ.Admitted) (hS : WF Δ S) {req : RewriteRequest}
     {evidence : List (Digest × Bytes)}
-    (h : rewrite accepts H grammar Δ S req evidence = some (Δ', S'))
+    (h : rewrite accepts H permits Δ S req evidence = some (Δ', S'))
     {q : PackageId} {r r' : PackageRecord} (hr : S.packages q = some r)
     (hr' : S'.packages q = some r') (hchanged : r' ≠ r) :
     r.status = .live ∧ Affected Δ Δ' r.holder :=
@@ -40,10 +40,10 @@ affected holders are disjoint across both orders, they also commute on every pac
 up to retirement stamps. -/
 theorem rewrite_commute (hΔ : Δ.Admitted) (hS : WF Δ S) {ρ₁ ρ₂ : RewriteRequest}
     {evidence : List (Digest × Bytes)} {Δ₁ Δ₂ Δ₁₂ Δ₂₁ : Definition} {S₁ S₂ S₁₂ S₂₁ : State}
-    (h₁ : rewrite accepts H grammar Δ S ρ₁ evidence = some (Δ₁, S₁))
-    (h₁₂ : rewrite accepts H grammar Δ₁ S₁ ρ₂ evidence = some (Δ₁₂, S₁₂))
-    (h₂ : rewrite accepts H grammar Δ S ρ₂ evidence = some (Δ₂, S₂))
-    (h₂₁ : rewrite accepts H grammar Δ₂ S₂ ρ₁ evidence = some (Δ₂₁, S₂₁)) :
+    (h₁ : rewrite accepts H permits Δ S ρ₁ evidence = some (Δ₁, S₁))
+    (h₁₂ : rewrite accepts H permits Δ₁ S₁ ρ₂ evidence = some (Δ₁₂, S₁₂))
+    (h₂ : rewrite accepts H permits Δ S ρ₂ evidence = some (Δ₂, S₂))
+    (h₂₁ : rewrite accepts H permits Δ₂ S₂ ρ₁ evidence = some (Δ₂₁, S₂₁)) :
     Δ₁₂.Equiv Δ₂₁ ∧
       ((∀ v, Affected Δ Δ₁ v ∨ Affected Δ₂ Δ₂₁ v → ¬ (Affected Δ Δ₂ v ∨ Affected Δ₁ Δ₁₂ v)) →
         ∀ q, (S₁₂.packages q).map PackageRecord.unstamped =
@@ -56,13 +56,13 @@ end
 
 section
 variable {accepts : ContractId → Bytes → Bool} {H : Bytes → Digest}
-  {grammar : List Production} {Δ Δ' : Definition} {S S' : State}
+  {permits : Policy} {Δ Δ' : Definition} {S S' : State}
 
 /-- Everything a transition may not change, it never changes across a run: accepted
 activations, each package's immutable facts, deliveries once made, settled statuses, and the
 lifetime records, which only grow. -/
 theorem sysSteps_frame (hΔ : Δ.Admitted) (hS : WF Δ S)
-    (h : SysSteps accepts H grammar Δ S Δ' S') : Frame S S' :=
+    (h : SysSteps accepts H permits Δ S Δ' S') : Frame S S' :=
   Proofs.sysSteps_frame hΔ hS h
 
 /-- An accepted activation identity is never accepted again. -/
@@ -72,7 +72,7 @@ theorem accepted_not_reaccepted {a : ActivationId} (ha : S.activations a ≠ non
 
 /-- A package identity is born only with its producing activation, when that activation is
 accepted; together with `sysSteps_frame`, no package identity is born twice. -/
-theorem sysStep_newborn {op : SysOp} (h : sysStep accepts H grammar Δ S op = some (Δ', S'))
+theorem sysStep_newborn {op : SysOp} (h : sysStep accepts H permits Δ S op = some (Δ', S'))
     {p : PackageId} {r : PackageRecord} (hnone : S.packages p = none)
     (hsome : S'.packages p = some r) :
     S.activations p.producer = none ∧ S'.activations p.producer ≠ none :=
@@ -80,26 +80,26 @@ theorem sysStep_newborn {op : SysOp} (h : sysStep accepts H grammar Δ S op = so
 
 /-- An accepted activation is never replaced. -/
 theorem activation_persists (hΔ : Δ.Admitted) (hS : WF Δ S)
-    (h : SysSteps accepts H grammar Δ S Δ' S') {a : ActivationId} {act : Activation}
+    (h : SysSteps accepts H permits Δ S Δ' S') {a : ActivationId} {act : Activation}
     (ha : S.activations a = some act) : S'.activations a = some act :=
   Proofs.activation_persists hΔ hS h ha
 
 /-- A node identity that has left the definition never returns to it. -/
 theorem removed_node_never_returns (hΔ : Δ.Admitted) (hS : WF Δ S)
-    (h : SysSteps accepts H grammar Δ S Δ' S') {v : NodeId} (hused : v ∈ S.usedNodes)
+    (h : SysSteps accepts H permits Δ S Δ' S') {v : NodeId} (hused : v ∈ S.usedNodes)
     (hgone : v ∉ Δ.nodes) : v ∉ Δ'.nodes :=
   Proofs.removed_node_never_returns hΔ hS h hused hgone
 
 /-- An edge identity that has left the definition never returns to it. -/
 theorem removed_edge_never_returns (hΔ : Δ.Admitted) (hS : WF Δ S)
-    (h : SysSteps accepts H grammar Δ S Δ' S') {e : EdgeId} (hused : e ∈ S.usedEdges)
+    (h : SysSteps accepts H permits Δ S Δ' S') {e : EdgeId} (hused : e ∈ S.usedEdges)
     (hgone : e ∉ Δ.edges.map (·.id)) : e ∉ Δ'.edges.map (·.id) :=
   Proofs.removed_edge_never_returns hΔ hS h hused hgone
 
 /-- I3 at the time of delivery: a transition keeps every delivery already made and makes new
 ones only over an edge of the definition it applies to, from the producer's node to the
 receiver. -/
-theorem sysStep_delivery {op : SysOp} (h : sysStep accepts H grammar Δ S op = some (Δ', S'))
+theorem sysStep_delivery {op : SysOp} (h : sysStep accepts H permits Δ S op = some (Δ', S'))
     {p : PackageId} {r' : PackageRecord} {d : Delivery} (hr' : S'.packages p = some r')
     (hd : r'.delivery = some d) :
     (∃ r, S.packages p = some r ∧ r.delivery = some d) ∨
@@ -171,8 +171,8 @@ theorem replay_sound {h : List (ActivationId × Activation)} {evidence : Digest 
 
 /-- A reachable workflow whose revision counts only its activations was reached by
 activations alone, under its current definition. -/
-theorem activationRun_of_revision {grammar : List Production}
-    (h : SysReachable accepts H grammar Δ S) (hrevision : S.revision = S.activationIds.length) :
+theorem activationRun_of_revision {permits : Policy}
+    (h : SysReachable accepts H permits Δ S) (hrevision : S.revision = S.activationIds.length) :
     ∃ payloads, ActivationRun accepts H Δ S payloads :=
   Proofs.activationRun_of_revision h hrevision
 
