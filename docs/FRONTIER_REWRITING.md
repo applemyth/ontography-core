@@ -10,11 +10,13 @@ receipt is held by its receiver. Only live packages participate in cleanup.
 
 ## Preparation and commit
 
-A grammar permits annotated productions `L ← K → R`. A match binds `L` to the
-current graph and allocates unused identities for `R \ K`. Preserved interface
-elements keep their incidence and annotations; deleting a node requires the
-matching deletion of its incident edges. The replacement definition is admitted
-against the current schema and contract registry before cleanup runs.
+A rewrite carries an explicit graph edit and the principal asking for it. The
+edit removes existing nodes and edges and adds a fragment of new ones whose
+identities were never used in the workflow. Removing a node requires removing
+every edge that touches it. Only added elements may carry definitions, root
+rules, or authority transitions, so surviving elements keep their incidence and
+annotations. The replacement definition is admitted against the current schema
+and contract registry before cleanup runs, and the edit policy decides last.
 
 The prepared transition carries its exact predecessor binding and proposed
 retirements. Both the in-memory state and SQLite rows run the same verifier
@@ -46,12 +48,13 @@ and this counterexample, ignoring only retirement revision stamps.
 
 ## Trust, evidence, and cost
 
-A grammar is an authority grant. Productions can introduce root rules and
-authority transitions, including from an empty left side, within the schema.
-The direct kernel accepts the caller's grammar; the runtime owns its configured
-grammar. Constructing a production checks identity, topology, and interface;
-grammar registration rejects duplicate production identities. Kernel-specific
-annotation and schema validation occurs when a production is used.
+The edit policy is an authority grant. An admitted edit can introduce root rules
+and authority transitions on the nodes it adds, within the schema, so the policy
+decides who may do so. The direct kernel accepts the caller's policy; the runtime
+owns its configured policy, and sessions without one accept no edits. The policy
+runs after structural admission and cleanup, sees the admitted result and exact
+retirements, and must be deterministic. A denial, or a policy panic, rejects the
+edit without mutation.
 
 Evidence is required only when a changed holder has a candidate edge whose
 metadata accepts the package. A missing or mismatched required payload, or a

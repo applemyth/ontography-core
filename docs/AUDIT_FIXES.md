@@ -59,8 +59,8 @@ Explicit content import/release retains its per-hash artifact ownership model.
 Independent temporary capture pins prevent one rejected capture from releasing
 another caller's import; they do not assign a permanent owner to every import.
 
-A grammar remains trusted policy capable of granting roots and authority
-transitions. Cleanup remains non-monotone and aborts atomically when required
+The edit policy, which has since replaced the rewrite grammar, remains trusted
+and decides who may grant roots and authority transitions to added nodes. Cleanup remains non-monotone and aborts atomically when required
 evidence or a validator fails. See the [frontier guide](FRONTIER_REWRITING.md)
 for the exact conditions. Changing these semantics would require a separate
 policy design, not an integrity fix.

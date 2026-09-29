@@ -191,7 +191,7 @@ functions from a view and a request to a transition:
 | `evaluate_activation(view, id, proposal)` | records of the proposal's inputs; graph | `Activation` |
 | `evaluate_transfer(view, p, edge, payload_for)` | record of `p`; graph and schema; bytes on demand | `Transfer` |
 | `evaluate_retire(view, p, evidence)` | record of `p`; graph; whether evidence ∈ A | `Retire` |
-| `evaluate_rewrite(frontier, grammar, request, payload_for)` | every live record; used ids; graph; bytes on demand | `Rewrite`, plus the next kernel |
+| `evaluate_rewrite(frontier, policy, request, payload_for)` | every live record; used ids; graph; bytes on demand | `Rewrite`, plus the next kernel |
 | `evaluate_extension_transition(view, next)` | binding | `Extension` |
 
 The public single-shot operations, `Kernel::activate` and `Kernel::retire`,
@@ -286,7 +286,7 @@ do not independently authenticate an omitted or altered history.
 
 T1–T3 are properties of this implementation and are pinned by tests. T4–T6 are
 properties of the calculus: the Lean model in [formal/](../formal/README.md)
-proves them for every validator and grammar. A differential test checks the
+proves them for every validator and edit policy. A differential test checks the
 kernel's transitions of every kind against the model; the replay and checkpoint
 results describe `restore_state` and `restore_checkpoint` through a reviewed
 correspondence pinned by the kernel's own tests. The model proves the

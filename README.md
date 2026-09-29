@@ -24,8 +24,8 @@ feedback loops.
 
 Contracts define acceptable results and package payloads. Authority rules govern
 permitted routes, root activations, and changes to the authority carried by
-outputs. Rewrite grammars define how nodes and edges may be replaced while
-accounting for affected live packages. Application code performs the work and
+outputs. Graph edits replace nodes and edges while accounting for affected live
+packages, and a trusted edit policy decides who may make them. Application code performs the work and
 proposes its outcomes; the **kernel** checks and applies admissible changes.
 
 The workflow's state records accepted history and outstanding work. Its
@@ -158,11 +158,10 @@ application, its code can additionally:
 
 31. **Transfer waiting outbound packages** through currently accepting edges.
 32. **Retire live packages**, optionally citing an accepted activation as evidence.
-33. **Rewrite the graph.** Apply permitted productions to create, remove, or
-    replace nodes and edges, inspecting the proposed replacement and package
+33. **Rewrite the graph.** Install an explicit edit that removes and adds nodes
+    and edges in one transition, inspecting the admitted replacement and package
     retirements before committing.
-34. **Introduce new root and authority policies** on new nodes through permitted
-    rewrite productions.
+34. **Introduce new root and authority policies** on the nodes an edit adds.
 35. **Extend the workflow vocabulary** with additional types, authority tags,
     and contracts while preserving existing definitions.
 36. **Launch and supervise executables**, including implementations at newly
@@ -464,25 +463,29 @@ these boundaries.
 
 A **rewrite** changes a running workflow's graph while accounting for its live
 packages. It can insert a stage, replace a subgraph, remove a branch, or introduce
-new places where work originates. The configured **rewrite grammar** determines
-which replacements are permitted; it is an authority policy supplied by the
-application.
+new places where work originates, all in one atomic transition.
 
-Each production describes `L ← K → R`: **L** is the fragment to match, **K** is
-its preserved interface, and **R** is the replacement. A request selects a
-production, binds its symbols to distinct current nodes and edges, and supplies
-fresh identities for additions. Matches must preserve topology and definitions.
-Surviving nodes keep their types, result contracts, ingress, root rules, and
-authority transitions; surviving edges keep their endpoints and annotations.
-Changing those definitions requires replacement with fresh identities. Deleted
-identities cannot be reused, and deleting a node requires deleting all its
-incident edges.
+A rewrite carries an explicit **graph edit** and the **principal** asking for it.
+The edit names existing nodes and edges to remove and a fragment of new ones to
+add. Every edge touching a removed node must be removed too, so an edit never
+drops an edge implicitly. Added nodes and edges carry identities never used
+before in the workflow, and removed identities never return. Definitions, root
+rules, and authority transitions may be given only to added elements: surviving
+nodes keep their types, result contracts, ingress, root rules, and authority
+transitions, and surviving edges keep their endpoints and annotations. Changing a
+definition means replacing the element with a fresh identity, in the same edit.
+Added edges may connect surviving and added nodes. New vocabulary must already
+exist in the schema.
 
-Productions may introduce new nodes with root permission and authority
-transitions, including from an empty **L**. Their vocabulary must already exist
-in the schema. Preparation admits the complete replacement definition and
-computes its cleanup. The resulting plan exposes the next kernel and exact
-retirements for inspection before commitment.
+Preparation admits the complete replacement definition and computes its cleanup.
+Then the workflow's **edit policy** decides whether the principal may make the
+edit. The policy is trusted, deterministic application code, like a contract
+validator: it sees the principal, the edit, the current and admitted next
+definitions, and the exact retirements, and its denial leaves the state
+unchanged. Sessions accept no edits unless a policy is configured. The resulting
+plan exposes the next kernel and exact retirements for inspection before
+commitment. Because cleanup sees only the final graph, replacing a route in one
+edit keeps work that removing the route first would strand.
 
 Cleanup applies only to live packages:
 
@@ -688,7 +691,7 @@ explicit root ceiling, which may be empty. Only entry placement installs a root
 rule; placing the same root-capable component elsewhere does not. The calculus
 itself supports several root-enabled nodes. Declarative formats reject explicit
 root-authority declarations on non-entry placements. A compiled application can
-also carry a rewrite grammar or be extended with additional vocabulary.
+also carry an edit policy or be extended with additional vocabulary.
 
 ### Declarative composition
 

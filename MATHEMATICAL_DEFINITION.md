@@ -66,8 +66,8 @@ transition policy is a relation `T ⊆ V × P(U) × P(U)`.
 Together, the graph, annotations, schema, contracts, and policies form an
 admitted definition `Δ`. Its definition identity names the workflow; its
 fingerprint commits to the canonical static structure. The fingerprint does
-not identify executable validator code. A rewrite grammar is a separate trusted
-policy supplied to the kernel or configured on the runtime.
+not identify executable validator code. A rewrite policy is a separate trusted
+predicate supplied to the kernel or configured on the runtime (§5).
 
 Implementation: [graph declarations](crates/calculus/src/graph.rs) and
 [definition admission](crates/calculus/src/kernel/definition.rs). Model:
@@ -256,27 +256,34 @@ Model: `transfer` and `retire` in [Step.lean](formal/Ontography/Step.lean).
 
 ## 5. Graph rewriting
 
-A grammar contains permitted productions `L ← K → R` with distinct identities.
-`L` and `R` are annotated graph fragments admitted under the current schema and
-contracts. `K` names the preserved interface: its nodes and edges occur in both
-`L` and `R`, each interface edge has both endpoints in `K` and the same
-incidence on both sides, and each interface element has the same annotation on
-both sides. A request binds exactly the symbols of `L` to current identities and
-exactly those of `R` outside `K` to fresh ones, injectively and nonempty.
+A rewrite applies an explicit edit `ε = (V⁻, E⁻, F)` on behalf of a principal
+`π`. `V⁻` and `E⁻` are the node and edge identities it removes. `F` is an
+annotated fragment, with nodes, edges, node definitions, edge annotations,
+transition rules, and root rules, that names the identities the edit allocates.
+An added edge may end at a surviving node as well as an added one. The edit
+applies when:
 
-A match is exact. Each matched node has the types, result contract, ingress,
-root ceiling, and authority transitions its symbol has in `L`, and each matched
-edge has its symbol's endpoints and complete annotation. Every edge incident to
-a deleted node must itself be matched in `L` outside `K`: a rewrite never
-removes an unmatched edge. Fresh identities must never have appeared in that
-state's lifetime identity sets. The replacement definition `Δ'` is `Δ` without
-the elements matched outside `K`, plus `R` outside `K` under its fresh
-identities, with each new edge's endpoints at the images of its interface or
-fresh endpoints. `Δ'` is admitted before the change is committed.
+- `V⁻` and `E⁻` are distinct current identities, and every edge of `Δ`
+  incident to a node of `V⁻` is in `E⁻`: a rewrite never leaves an edge
+  dangling.
+- Every node and edge identity of `F` is fresh: it never appeared in the
+  state's lifetime identity sets. An identity that leaves the definition,
+  including one this edit removes, is never allocated again.
+- `F` defines only what it adds: every node definition, transition rule, and
+  root rule in `F` belongs to a node of `F`, and every edge annotation to an
+  edge of `F`. A surviving node or edge keeps its definition and policies;
+  changing one means replacing it under a fresh identity.
+- The replacement `Δ'` is admitted. It is `Δ` without the nodes of `V⁻`, with
+  their definitions, transition rules, and root rules, and without the edges of
+  `E⁻`, with their annotations, plus `F`.
 
-A production may introduce new root rules and authority transitions on new
-nodes, including when `L` is empty. Existing consumed or retired records remain
-historical facts. Live packages are cleaned up under `Δ'` by these rules:
+Admission of `Δ'` also makes the allocated identities distinct and nonempty
+and places every added edge between nodes of `Δ'`. An edit may introduce root
+rules and authority transitions on new nodes. The empty edit is an identity
+rewrite.
+
+Existing consumed or retired records remain historical facts. Live packages are
+cleaned up under `Δ'` by these rules:
 
 | Condition | Effect |
 | --- | --- |
@@ -287,10 +294,17 @@ historical facts. Live packages are cleaned up under `Δ'` by these rules:
 | `In`, surviving holder has `All` ingress | Keep iff the delivery edge remains incoming; otherwise retire as `RouteRemoved`. |
 
 All structural retirements use the rewrite's successor revision and have no
-explicit evidence. Graph replacement, identity allocation, and cleanup commit
-together. A missing or mismatched required payload, or a failing evaluation,
-aborts the whole preparation. Contract rejection makes a candidate route
-unacceptable; a validator panic aborts evaluation.
+explicit evidence. A missing or mismatched required payload, or a failing
+evaluation, aborts the whole preparation. Contract rejection makes a candidate
+route unacceptable; a validator panic aborts evaluation.
+
+Finally the rewrite policy decides. The rewrite takes effect only if
+`permits(π, Δ, ε, Δ', R)` holds, where `R` is the set of retirements the
+cleanup makes. The policy is a trusted predicate supplied to the kernel or
+configured on the runtime, like the validators, and every theorem holds for
+every policy. It can refuse an admissible edit but cannot make an inadmissible
+one admissible. Graph replacement, identity allocation, and cleanup commit
+together; a refusal, like any other rejection, leaves the state unchanged.
 
 The rewrite does not deliver packages or launch executables. Adding a rejecting
 route can retire previously waiting work, so adding edges does not generally
@@ -300,7 +314,7 @@ sets across both application orders; the precise conditions are in the
 [transition specification](docs/TRANSITIONS.md).
 
 Implementation: [rewriting](crates/calculus/src/kernel/rewrite.rs) and
-[cleanup](crates/calculus/src/kernel/frontier.rs). Model: `structural?`,
+[cleanup](crates/calculus/src/kernel/frontier.rs). Model: `structuralEdit?`,
 `cleanup?`, and `rewrite` in [Rewrite.lean](formal/Ontography/Rewrite.lean).
 `rewrite_spec` states the rule exactly, `wf_rewrite` that it preserves every
 invariant, `rewrite_local` that it changes only packages at affected holders,

@@ -24,26 +24,27 @@ The toolchain is pinned in `lean-toolchain`, and the model uses Lean's core libr
 | `State.lean` | Package records, activations, and states (§2). |
 | `Step.lean` | The law under a fixed definition: `activate`, `transfer`, `retire`, and `step` (§3–§4). |
 | `Invariants.lean` | `WF`, the invariants I1–I7 with causal acyclicity; `Frame`; `Reachable`. |
-| `Rewrite.lean` | Productions, matches, `structural?`, the cleanup table `cleanup?`, `rewrite`, and `extend` (§5–§6). |
+| `Rewrite.lean` | Edits, `structuralEdit?`, the cleanup table `cleanup?`, the rewrite `Policy`, `rewrite`, and `extend` (§5–§6). |
 | `System.lean` | Running workflows: `sysStep` over definition and state, and `SysReachable`. |
 | `Theorems.lean` | Theorems of the fixed-definition calculus. |
 | `SystemTheorems.lean` | Theorems of rewriting, extension, and whole runs. |
 | `Commutation.lean`, `Runs.lean`, `Checkpoint.lean`, `Replay.lean` | Definitions the metatheory needs. |
 | `Metatheory.lean` | T4, T6 over runs, checkpoint restoration, and T5. |
-| `Examples.lean` | Kernel rewrite tests replayed as build-time `#guard`s. |
+| `Examples.lean` | Kernel rewrite scenarios replayed as build-time `#guard`s. |
 | `Proofs/` | The proofs. Reviewing the calculus means reading the statement files above, not these. |
 | `Audit.lean` | Fails the build if a headline theorem depends on `sorryAx` or any non-standard axiom. |
 
 ## Headline theorems
 
-Each holds for every validator, commitment function, and rewrite grammar.
+Each holds for every validator, commitment function, and rewrite policy.
 
 - `wf_initial`, `wf_step`, `wf_of_reachable`: every state reachable under an admitted
   definition satisfies `WF`.
 - `wf_rewrite`, `wf_extend`, `wf_sysStep`, `wf_of_sysReachable`: rewrites and extensions keep
   the definition admitted and the state well formed.
 - `rewrite_spec`, `extend_spec`: the rewrite and extension rules exactly, including the
-  cleanup table and its successor-revision stamp.
+  cleanup table, its successor-revision stamp, and the policy's permission for the edit with
+  exactly the retirements its cleanup makes.
 - `step_revision`, `sysStep_revision`: each transition advances the revision once.
 - `step_frame`, `sysStep_frame`, `sysStep_fresh`: transitions never change accepted
   activations, immutable package facts, deliveries once made, or settled statuses, and a new
@@ -75,6 +76,10 @@ The theorems assume nothing about these, so they hold for every choice:
 - **The payload commitment.** The rules take `H : Bytes → Digest`. Where the kernel relies on
   SHA-256 being collision-free, the model says so: validation caching (Step.lean) and replay
   evidence (`replay_history`).
+- **The rewrite policy.** The rules take `permits : Policy`, which decides from the
+  principal, the current definition, the edit, its replacement, and the retirements its
+  cleanup makes whether a rewrite takes effect. It is the kernel's `EditPolicy`, and replaces
+  the rewrite grammar of earlier versions.
 - **Fresh identities.** The kernel draws activation identities at random; the model takes them
   as inputs, and admission requires them to be fresh.
 
@@ -99,7 +104,8 @@ The model differs from the kernel's data structures in ways that do not change t
   are sorted, duplicate-free sets.
 - The order of `activationIds` and `packageIds` is the model's; the kernel's maps record
   none, which is why the checkpoint and replay results hold up to permutation.
-- A package trigger's inputs are a duplicate-free list; a kernel proposal is a set.
+- A package trigger's inputs are a duplicate-free list; a kernel proposal is a set. Likewise
+  an edit's removed nodes and edges, which the kernel's `GraphEdit` holds as sets.
 - Output `i` of activation `a` is package `(a, i)`, as live evaluation numbers them. The
   kernel's restorations accept any distinct numbering, so the model describes them up to
   renumbering.
@@ -129,9 +135,9 @@ checkpoints, which it accepts today.
 ## Checking the kernel
 
 `tests/lean_oracle.rs` drives the Rust kernel with random activations, transfers,
-retirements, rewrites, and extensions over a fixed grammar menu, and writes each run as a
-JSON trace ([TRACE_FORMAT.md](TRACE_FORMAT.md)). The `oracle` executable built from this
-directory replays the trace through the model's `sysStep`, and the test fails on any
+retirements, rewrites, and extensions, and writes each run as a JSON trace
+([TRACE_FORMAT.md](TRACE_FORMAT.md)). The `oracle` executable built from this directory
+replays the trace through the model's `sysStep`, and the test fails on any
 disagreement in acceptance or in the resulting state, which includes the current definition.
 A required prefix pins the rule cases and the kernel scenarios of `Examples.lean`; stale
 prepared plans have no model counterpart and are checked against the kernel alone. Build the
