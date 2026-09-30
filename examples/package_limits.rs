@@ -4,8 +4,9 @@
 //! under `/usr/bin/time`, so each peak RSS belongs to that case alone, and
 //! prints one markdown row per case. `-- child <build|full> <mem|disk> <shape>`
 //! runs a single case: `saves F d N`, `bomb k`, or `wide`. `-- real <dir>`
-//! imports a real folder, then times opening it under the default limits
-//! after 0, 1, 10, 100 and 1,000 one-file saves.
+//! imports a real folder, then opens it under the default limits after 0, 1,
+//! 10, 100 and 1,000 one-file saves, timing each open and checking every
+//! path, kind, file hash and symlink target against a walk of the filesystem.
 
 #[path = "../tests/support/mod.rs"]
 #[allow(dead_code)]
@@ -17,9 +18,11 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use ontography::content::Hash;
 use ontography::package::validate_package_name;
 use ontography::{
     ContentId, ContentStore, PackageDocument, PackageLimits, PackageStore, ProposalRuntime,
+    ResolvedEntry, ResolvedEntryKind,
 };
 
 const UNBOUNDED: PackageLimits = PackageLimits {
@@ -199,8 +202,52 @@ fn folders(dir: &Path, out: &mut Vec<PathBuf>) {
     out.push(dir.to_owned());
 }
 
-/// Import a real folder as one collection per folder, then time opening it
-/// under the default limits as one-file saves accumulate.
+/// What the filesystem holds under `dir`, as a view of it should show it: the
+/// import's rules, applied by a walk of their own.
+fn expected(dir: &Path) -> BTreeMap<String, String> {
+    let mut expected = BTreeMap::from([(String::new(), "directory".to_owned())]);
+    let mut pending = vec![(dir.to_owned(), String::new())];
+    while let Some((folder, prefix)) = pending.pop() {
+        for entry in std::fs::read_dir(&folder).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if validate_package_name(&name).is_err() {
+                continue;
+            }
+            let path = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            let kind = entry.file_type().unwrap();
+            let fact = if kind.is_symlink() {
+                let target = std::fs::read_link(entry.path()).unwrap();
+                format!("symlink {}", target.to_string_lossy())
+            } else if kind.is_file() {
+                format!("file {}", Hash::new(std::fs::read(entry.path()).unwrap()))
+            } else if kind.is_dir() && !matches!(name.as_str(), ".git" | "target") {
+                pending.push((entry.path(), path.clone()));
+                "directory".to_owned()
+            } else {
+                continue;
+            };
+            expected.insert(path, fact);
+        }
+    }
+    expected
+}
+
+fn fact(entry: &ResolvedEntry) -> String {
+    match &entry.kind {
+        ResolvedEntryKind::Directory => "directory".to_owned(),
+        ResolvedEntryKind::File { content, .. } => format!("file {}", content.hash()),
+        ResolvedEntryKind::Symlink { target } => format!("symlink {target}"),
+    }
+}
+
+/// Import a real folder as one collection per folder, then open it under the
+/// default limits as one-file saves accumulate, checking each view against
+/// the filesystem.
 async fn real(dir: &Path) {
     let session = ProposalRuntime::new(Arc::new(support::kernel(&["A"], &[])))
         .open()
@@ -243,18 +290,41 @@ async fn real(dir: &Path) {
         ids.insert(folder, builder.collection(entries).await);
     }
     let edited = edited.unwrap().to_string_lossy().into_owned();
+    let mut wanted = expected(dir);
     let packages = PackageStore::new(content);
     let mut root = ids[dir];
     for saves in 0..=1_000 {
+        if saves > 0 {
+            let last = format!("save {}", saves - 1);
+            wanted.insert(edited.clone(), format!("file {}", Hash::new(last)));
+        }
         if [0, 1, 10, 100, 1_000].contains(&saves) {
             let started = Instant::now();
-            match packages.resolve(root).await {
-                Ok(view) => println!(
-                    "saves={saves}\tentries={}\tresolve_ms={:.1}",
-                    view.entry_count(),
-                    millis(started.elapsed())
-                ),
+            let view = match packages.resolve(root).await {
+                Ok(view) => view,
                 Err(error) => return println!("saves={saves}\trefused: {error}"),
+            };
+            let elapsed = millis(started.elapsed());
+            let seen: BTreeMap<String, String> = view
+                .entries()
+                .iter()
+                .map(|entry| (entry.path.clone(), fact(entry)))
+                .collect();
+            println!(
+                "saves={saves}\tentries={}\tresolve_ms={elapsed:.1}\tmatches_filesystem={}",
+                view.entry_count(),
+                seen == wanted
+            );
+            if let Some(path) = wanted
+                .keys()
+                .chain(seen.keys())
+                .find(|path| wanted.get(*path) != seen.get(*path))
+            {
+                return println!(
+                    "first difference at {path:?}: expected {:?}, saw {:?}",
+                    wanted.get(path),
+                    seen.get(path)
+                );
             }
         }
         let file = builder.file(format!("save {saves}")).await;
