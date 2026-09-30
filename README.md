@@ -575,8 +575,12 @@ any processes they start need application supervision.
 
 An invocation's `ContextPolicy` selects initially prepared inputs: none, received
 packages or explicit root input, or permitted causal ancestry. Optional
-exploration uses invocation-local opaque handles to describe packages, follow
-parents, list collection members, and read bounded payload ranges. Ancestor
+exploration uses invocation-local handles to describe packages, follow
+parents, list collection members, and read bounded payload ranges. A composed
+package is granted as one view; its members are answered from that view and
+addressed as `<owner>/<path>`, so nothing is stored per member. Tool
+descriptors name each view by its root and size, and `package.list` reveals the
+members below a folder. Ancestor
 metadata and ancestor payload access are separate grants. Cumulative package,
 member, byte, and event budgets bound these operations.
 
@@ -599,10 +603,10 @@ commit acknowledgement is uncertain. Reopening resolves durable state and
 performs the required integrity checks before admission can resume.
 
 The graph store uses schema version 11 and the invocation context store uses
-version 2. Each version is checked independently; incompatible stores are
-rejected without migration. Context version 2 removes the former workspace
-policy from stored invocation records, so runs using context version 1 cannot
-be reopened by this version.
+version 3. Each version is checked independently; incompatible stores are
+rejected without migration. Context version 3 stores one grant per package view
+instead of one per member, so runs using earlier context versions cannot be
+reopened by this version.
 
 Ordinary reopening loads the stored current graph and indexed state, including runs
 changed by rewrites and other dynamic transitions. It trusts the store owned by
@@ -642,9 +646,20 @@ into four kinds of `PackageDocument`:
 | **Symlink** | A recorded target string, which package resolution does not follow. |
 
 Collections can nest. A changes package can reuse a base and unchanged members
-without copying them, preserving previous versions. Resolution computes the
-current visible tree under limits on depth, document count, entries, and metadata
-size. Invalid paths, ambiguous overlapping changes, and cycles are rejected.
+without copying them, preserving previous versions. Resolution evaluates the
+documents once into the current view: a shared tree in which a folder points at
+its members rather than copying them, and a save changes only the paths it
+names. Every question about the package is answered from that view. Its cost
+therefore follows two real quantities, which `PackageLimits` bounds: the input,
+meaning the documents read and the bytes evaluation uses (a save that must
+copy or create a directory is charged when it does), and the output, meaning
+the entries visible and the bytes their paths and symlink targets take to
+write out. Every view counts both as it is built, so a small shared composition
+describing an exponentially large view is refused from counts before any path
+is written. Hosts choose these bounds for their machine with
+`ProposalRuntime::set_package_limits`. Every visible path stays at most 4096
+bytes, so a later save can still name it; this also bounds nesting. Invalid
+paths, ambiguous overlapping changes, and cycles are rejected.
 Content identity commits to exact representation bytes; different compositions
 can describe equivalent visible trees while retaining different identities.
 
@@ -657,7 +672,9 @@ ordinary arbitrary bytes do not implicitly declare referenced artifacts.
 **Retention and access are separate.** A changes package must retain its base and
 hidden historical dependencies to preserve its representation. An invocation's
 grants expose its resolved visible view; retained old files are not automatically
-readable or eligible for republication by a worker. Staged imports keep
+readable or eligible for republication by a worker. A worker may republish only
+a package whose own view is exactly a subtree of its grant: a folder a save
+changed carries that save's identity, whose own view would include hidden files. Staged imports keep
 tentative content alive until the caller accepts it, and release their own
 retention on failure without discarding another operation's content.
 
