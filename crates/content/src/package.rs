@@ -5,7 +5,8 @@
 //! follows the entire representation, while access can follow only the resolved
 //! visible entries. In particular, retaining a base does not grant its old files.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -88,34 +89,35 @@ impl PackageEnvelope {
     }
 }
 
-/// Bounded document loading and visible-tree expansion.
+/// Bounds on the two real costs of a view: its input, the documents read and
+/// the work of evaluating them, and its output, the entries it makes visible.
+/// Hosts choose them for their machine; nothing else limits a package.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PackageLimits {
-    /// Maximum distinct package documents in the complete retention closure.
-    pub max_packages: usize,
-    /// Maximum package-reference depth, including stacked changes packages.
-    pub max_depth: usize,
-    /// Maximum entries in any resolved tree, including its root entry.
+    /// Maximum distinct documents in the complete retention closure.
+    pub max_documents: usize,
+    /// Maximum bytes in one document before decoding it.
+    pub max_document_bytes: u64,
+    /// Maximum bytes evaluation may use: every document read, plus each
+    /// directory a save creates or copies, charged when it does.
+    pub max_evaluation_bytes: u64,
+    /// Maximum entries in any resolved view, including its root entry. A small
+    /// shared DAG can describe an exponentially large view; this refuses it
+    /// from counts alone, before any path is written out.
     pub max_entries: usize,
-    /// Maximum bytes in one package document before decoding it.
-    pub max_metadata_bytes: u64,
-    /// Maximum document bytes plus expanded path and symlink-target bytes.
-    /// Shared compositions must not amplify small documents into huge strings.
-    pub max_total_metadata_bytes: u64,
-    /// Maximum entries constructed across intermediate resolved trees. This
-    /// bounds work and memory even when a small shared DAG expands repeatedly.
-    pub max_expanded_entries: usize,
+    /// Maximum bytes of paths and symlink targets in any resolved view: what
+    /// writing it out costs.
+    pub max_view_bytes: u64,
 }
 
 impl Default for PackageLimits {
     fn default() -> Self {
         Self {
-            max_packages: 100_000,
-            max_depth: 128,
+            max_documents: 100_000,
+            max_document_bytes: 16 * 1024 * 1024,
+            max_evaluation_bytes: 64 * 1024 * 1024,
             max_entries: 100_000,
-            max_metadata_bytes: 16 * 1024 * 1024,
-            max_total_metadata_bytes: 64 * 1024 * 1024,
-            max_expanded_entries: 1_000_000,
+            max_view_bytes: 64 * 1024 * 1024,
         }
     }
 }
@@ -153,11 +155,15 @@ pub enum ResolvedEntryKind {
     },
 }
 
-/// An immutable composition's resolved current view and retention closure.
-#[derive(Clone, Debug)]
+/// An immutable composition's current view and retention closure.
+///
+/// The view is one shared tree, evaluated once from the package's documents.
+/// Cloning it is cheap, and every question about what the package holds is
+/// answered from it, so no caller needs its own copy.
+#[derive(Clone)]
 pub struct ResolvedPackage {
     root: ContentId,
-    entries: Vec<ResolvedEntry>,
+    tree: Arc<Node>,
     dependencies: Vec<ContentId>,
 }
 
@@ -168,10 +174,84 @@ impl ResolvedPackage {
         self.root
     }
 
-    /// Visible entries ordered lexicographically by canonical path.
+    /// Visible entries, including the root, counted without writing out paths.
     #[must_use]
-    pub fn entries(&self) -> &[ResolvedEntry] {
-        &self.entries
+    pub fn entry_count(&self) -> usize {
+        self.tree.len()
+    }
+
+    /// Bytes of every visible path and symlink target: what writing the view
+    /// out costs, known without doing it.
+    #[must_use]
+    pub fn view_bytes(&self) -> u64 {
+        self.tree.bytes()
+    }
+
+    /// Visible entries ordered lexicographically by canonical path. This
+    /// writes out every path; `entry` and `children` answer lookups directly.
+    #[must_use]
+    pub fn entries(&self) -> Vec<ResolvedEntry> {
+        let mut entries = Vec::with_capacity(self.entry_count());
+        let mut pending = vec![(String::new(), &self.tree)];
+        while let Some((path, node)) = pending.pop() {
+            if let Node::Dir(dir) = &**node {
+                pending.extend(dir.children.iter().map(|(n, c)| (join(&path, n), c)));
+            }
+            entries.push(node.entry(path));
+        }
+        entries.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+        entries
+    }
+
+    /// The root entry, whose path is empty.
+    #[must_use]
+    pub fn root_entry(&self) -> ResolvedEntry {
+        self.tree.entry(String::new())
+    }
+
+    /// The visible entry at `path`; the empty path names the root.
+    #[must_use]
+    pub fn entry(&self, path: &str) -> Option<ResolvedEntry> {
+        self.node(path).map(|node| node.entry(path.to_owned()))
+    }
+
+    /// Immediate children of the directory at `path`, ordered by name.
+    #[must_use]
+    pub fn children(&self, path: &str) -> Option<Vec<ResolvedEntry>> {
+        let Node::Dir(dir) = &**self.node(path)? else {
+            return None;
+        };
+        Some(
+            dir.children
+                .iter()
+                .map(|(name, child)| child.entry(join(path, name)))
+                .collect(),
+        )
+    }
+
+    /// The package whose own view is exactly the subtree at `path`. A
+    /// directory changed by a save carries that save's ID, whose own view is
+    /// the save's whole tree, so it has none: republishing that ID would
+    /// expose files this view hides.
+    #[must_use]
+    pub fn republishable(&self, path: &str) -> Option<ContentId> {
+        let node = self.node(path)?;
+        node.own().then(|| node.package())
+    }
+
+    /// Whether `id` is republishable at some path of this view.
+    #[must_use]
+    pub fn publishes(&self, id: ContentId) -> bool {
+        let mut pending = vec![&self.tree];
+        while let Some(node) = pending.pop() {
+            if node.own() && node.package() == id {
+                return true;
+            }
+            if let Node::Dir(dir) = &**node {
+                pending.extend(dir.children.values());
+            }
+        }
+        false
     }
 
     /// Every representation dependency, including hidden bases and old bytes.
@@ -181,12 +261,33 @@ impl ResolvedPackage {
         self.dependencies.clone()
     }
 
-    /// Distinct package identities occurring in the current resolved view.
-    /// Directory capabilities must still be bound to this root and their path:
-    /// a modified directory can share its changes-package ID with another path.
-    #[must_use]
-    pub fn visible_packages(&self) -> Vec<ContentId> {
-        unique_ids(self.entries.iter().map(|entry| entry.package))
+    fn node(&self, path: &str) -> Option<&Arc<Node>> {
+        if path.is_empty() {
+            return Some(&self.tree);
+        }
+        path.split('/')
+            .try_fold(&self.tree, |node, name| match &**node {
+                Node::Dir(dir) => dir.children.get(name),
+                Node::Leaf(..) => None,
+            })
+    }
+}
+
+impl std::fmt::Debug for ResolvedPackage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ResolvedPackage")
+            .field("root", &self.root)
+            .field("entries", &self.entry_count())
+            .finish_non_exhaustive()
+    }
+}
+
+fn join(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{prefix}/{name}")
     }
 }
 
@@ -243,7 +344,7 @@ impl PackageStore {
     pub async fn put(&self, document: &PackageDocument) -> Result<ContentId, PackageError> {
         validate_document(document, self.limits)?;
         let bytes = serde_json::to_vec(document)?;
-        if bytes.len() as u64 > self.limits.max_metadata_bytes {
+        if bytes.len() as u64 > self.limits.max_document_bytes {
             return Err(PackageError::Limit("document bytes"));
         }
         Ok(self.content.import_bytes(bytes).await?)
@@ -258,7 +359,7 @@ impl PackageStore {
     /// Returns invalid-document, metadata-limit, or verified-content errors.
     pub async fn get(&self, id: ContentId) -> Result<PackageDocument, PackageError> {
         require_raw(id)?;
-        if id.size() > self.limits.max_metadata_bytes {
+        if id.size() > self.limits.max_document_bytes {
             return Err(PackageError::Limit("document bytes"));
         }
         let bytes = self.content.read_range(id, 0..id.size()).await?;
@@ -286,14 +387,14 @@ impl PackageStore {
 
     async fn load(&self, root: ContentId) -> Result<Loaded, PackageError> {
         let mut traversal = Traversal::new(root, self.limits);
-        while let Some((id, depth)) = traversal.next()? {
+        while let Some(id) = traversal.next()? {
             let document = self.get(id).await?;
             if let PackageDocument::File { content, .. } = &document
                 && !self.content.metadata(*content).await?.complete
             {
                 return Err(ContentError::Missing(content.hash()).into());
             }
-            traversal.insert(id, depth, document);
+            traversal.insert(id, document);
         }
         Ok(traversal.finish())
     }
@@ -331,7 +432,6 @@ pub fn validate_package_path(path: &str) -> Result<(), PackageError> {
 }
 
 type Key = ([u8; 32], u64);
-type Tree = BTreeMap<String, (ContentId, ResolvedEntryKind)>;
 
 fn key(id: ContentId) -> Key {
     (*id.hash().as_bytes(), id.size())
@@ -412,7 +512,7 @@ fn references(document: &PackageDocument) -> Vec<ContentId> {
 }
 
 enum Visit {
-    Enter(ContentId, usize),
+    Enter(ContentId),
     Exit(ContentId),
 }
 
@@ -425,7 +525,7 @@ struct Loaded {
 struct Traversal {
     limits: PackageLimits,
     pending: Vec<Visit>,
-    heights: BTreeMap<Key, usize>,
+    finished: BTreeSet<Key>,
     loaded: Loaded,
     bytes: u64,
 }
@@ -434,8 +534,8 @@ impl Traversal {
     fn new(root: ContentId, limits: PackageLimits) -> Self {
         Self {
             limits,
-            pending: vec![Visit::Enter(root, 0)],
-            heights: BTreeMap::new(),
+            pending: vec![Visit::Enter(root)],
+            finished: BTreeSet::new(),
             loaded: Loaded {
                 documents: BTreeMap::new(),
                 order: Vec::new(),
@@ -445,56 +545,43 @@ impl Traversal {
         }
     }
 
-    fn next(&mut self) -> Result<Option<(ContentId, usize)>, PackageError> {
+    fn next(&mut self) -> Result<Option<ContentId>, PackageError> {
         while let Some(visit) = self.pending.pop() {
             match visit {
                 Visit::Exit(id) => {
-                    // Cached shared subtrees still contribute their full height
-                    // when reached through a deeper branch of the DAG.
-                    let height = references(&self.loaded.documents[&key(id)])
-                        .iter()
-                        .map(|child| self.heights[&key(*child)] + 1)
-                        .max()
-                        .unwrap_or(0);
-                    if height > self.limits.max_depth {
-                        return Err(PackageError::Limit("reference depth"));
-                    }
-                    self.heights.insert(key(id), height);
+                    self.finished.insert(key(id));
                     self.loaded.order.push(id);
                 }
-                Visit::Enter(id, depth) => {
-                    if depth > self.limits.max_depth {
-                        return Err(PackageError::Limit("reference depth"));
-                    }
-                    if self.heights.contains_key(&key(id)) {
+                Visit::Enter(id) => {
+                    if self.finished.contains(&key(id)) {
                         continue;
                     }
-                    // A loaded document without a completed height is an
-                    // ancestor on the current DFS path, not a second state set.
+                    // A loaded document that has not finished is an ancestor
+                    // on the current DFS path, not a second state set.
                     if self.loaded.documents.contains_key(&key(id)) {
                         return Err(PackageError::Cycle);
                     }
-                    if self.loaded.documents.len() >= self.limits.max_packages {
-                        return Err(PackageError::Limit("package documents"));
+                    if self.loaded.documents.len() >= self.limits.max_documents {
+                        return Err(PackageError::Limit("documents"));
                     }
                     self.bytes = self
                         .bytes
                         .checked_add(id.size())
-                        .ok_or(PackageError::Limit("total document bytes"))?;
-                    if self.bytes > self.limits.max_total_metadata_bytes {
-                        return Err(PackageError::Limit("total document bytes"));
+                        .ok_or(PackageError::Limit("evaluation bytes"))?;
+                    if self.bytes > self.limits.max_evaluation_bytes {
+                        return Err(PackageError::Limit("evaluation bytes"));
                     }
-                    return Ok(Some((id, depth)));
+                    return Ok(Some(id));
                 }
             }
         }
         Ok(None)
     }
 
-    fn insert(&mut self, id: ContentId, depth: usize, document: PackageDocument) {
+    fn insert(&mut self, id: ContentId, document: PackageDocument) {
         self.pending.push(Visit::Exit(id));
         for child in references(&document).into_iter().rev() {
-            self.pending.push(Visit::Enter(child, depth + 1));
+            self.pending.push(Visit::Enter(child));
         }
         self.loaded.dependencies.push(id);
         if let PackageDocument::File { content, .. } = &document {
@@ -509,31 +596,259 @@ impl Traversal {
     }
 }
 
-struct ExpansionBudget {
-    limits: PackageLimits,
-    entries: usize,
-    bytes: u64,
+/// One entry of a view. Subtrees are shared, never copied, unless a save
+/// writes through a directory that another document still uses.
+#[derive(Clone)]
+enum Node {
+    /// A file or symlink: always exactly its own document's view.
+    Leaf(ContentId, ResolvedEntryKind),
+    Dir(Dir),
 }
 
-impl ExpansionBudget {
-    fn entry(&mut self, path_bytes: usize, kind: &ResolvedEntryKind) -> Result<(), PackageError> {
-        self.entries = self.entries.saturating_add(1);
-        if self.entries > self.limits.max_expanded_entries {
-            return Err(PackageError::Limit("expanded entries"));
+#[derive(Clone)]
+struct Dir {
+    /// Document supplying this directory: its collection, or the save that changed it.
+    package: ContentId,
+    /// Whether this directory is exactly its package's own view.
+    own: bool,
+    /// Visible entries in this subtree, itself included.
+    len: usize,
+    /// Bytes of every path and symlink target below this directory, relative
+    /// to it: what writing the subtree out costs.
+    bytes: u64,
+    /// Longest relative path below this directory, in bytes.
+    depth: usize,
+    children: Arc<BTreeMap<String, Arc<Node>>>,
+}
+
+/// Longest relative path in any view: every visible path must stay a valid
+/// change path, so a later save can still name it.
+const MAX_PATH: usize = 4096;
+/// Heap one map entry occupies besides its name.
+const ENTRY_BYTES: u64 = size_of::<(String, Arc<Node>)>() as u64;
+/// Heap the smallest map allocation takes: a std B-tree leaf holds 11 entries.
+const LEAF_BYTES: u64 = 11 * ENTRY_BYTES;
+/// Heap one node occupies behind its reference counts.
+const NODE_BYTES: u64 = (size_of::<Node>() + 2 * size_of::<usize>()) as u64;
+/// Heap one directory's map occupies behind its reference counts.
+const MAP_BYTES: u64 = (size_of::<BTreeMap<String, Arc<Node>>>() + 2 * size_of::<usize>()) as u64;
+
+impl Node {
+    fn len(&self) -> usize {
+        match self {
+            Self::Leaf(..) => 1,
+            Self::Dir(dir) => dir.len,
         }
-        let target_bytes = match kind {
-            ResolvedEntryKind::Symlink { target } => target.len(),
-            _ => 0,
+    }
+
+    fn bytes(&self) -> u64 {
+        match self {
+            Self::Leaf(_, ResolvedEntryKind::Symlink { target }) => target.len() as u64,
+            Self::Leaf(..) => 0,
+            Self::Dir(dir) => dir.bytes,
+        }
+    }
+
+    fn package(&self) -> ContentId {
+        match self {
+            Self::Leaf(package, _) => *package,
+            Self::Dir(dir) => dir.package,
+        }
+    }
+
+    fn own(&self) -> bool {
+        match self {
+            Self::Leaf(..) => true,
+            Self::Dir(dir) => dir.own,
+        }
+    }
+
+    /// Longest path through this node when it is named `name`.
+    fn span(&self, name: &str) -> usize {
+        match self {
+            Self::Dir(dir) if !dir.children.is_empty() => name.len() + 1 + dir.depth,
+            _ => name.len(),
+        }
+    }
+
+    /// Bytes this node adds to its parent's view when named `name`: the name
+    /// on every entry here, a separator on each below, and its own bytes.
+    fn weight(&self, name: &str) -> u64 {
+        let len = self.len() as u64;
+        len.saturating_mul(name.len() as u64)
+            .saturating_add(len - 1)
+            .saturating_add(self.bytes())
+    }
+
+    fn entry(&self, path: String) -> ResolvedEntry {
+        let (package, kind) = match self {
+            Self::Leaf(package, kind) => (*package, kind.clone()),
+            Self::Dir(dir) => (dir.package, ResolvedEntryKind::Directory),
         };
-        self.bytes = self
-            .bytes
-            .saturating_add(path_bytes as u64)
-            .saturating_add(target_bytes as u64);
-        if self.bytes > self.limits.max_total_metadata_bytes {
-            return Err(PackageError::Limit("expanded metadata bytes"));
+        ResolvedEntry {
+            path,
+            package,
+            kind,
+        }
+    }
+}
+
+impl Dir {
+    fn new(package: ContentId, own: bool, children: BTreeMap<String, Arc<Node>>) -> Self {
+        let mut dir = Self {
+            package,
+            own,
+            len: 1,
+            bytes: 0,
+            depth: 0,
+            children: Arc::default(),
+        };
+        for (name, child) in &children {
+            dir.add(name, child);
+        }
+        dir.children = Arc::new(children);
+        dir
+    }
+
+    /// Count `child`, named `name`, into this directory's totals.
+    fn add(&mut self, name: &str, child: &Node) {
+        self.len = self.len.saturating_add(child.len());
+        self.bytes = self.bytes.saturating_add(child.weight(name));
+        self.depth = self.depth.max(child.span(name));
+    }
+
+    /// Take `child`, named `name`, out of the totals; `settle` restores the depth.
+    fn subtract(&mut self, name: &str, child: &Node) {
+        self.len = self.len.saturating_sub(child.len());
+        self.bytes = self.bytes.saturating_sub(child.weight(name));
+    }
+
+    /// After a child's longest path went from `old` to `new`, rescan only if
+    /// it held this directory's longest path and got shorter. The rescan is
+    /// charged like reading the directory again.
+    fn settle(
+        &mut self,
+        old: Option<usize>,
+        new: Option<usize>,
+        budget: &mut Budget,
+    ) -> Result<(), PackageError> {
+        if old.is_some_and(|old| old == self.depth && new.is_none_or(|new| new < old)) {
+            budget.charge(self.children.len() as u64 * ENTRY_BYTES)?;
+            self.depth = self
+                .children
+                .iter()
+                .map(|(name, child)| child.span(name))
+                .max()
+                .unwrap_or(0);
         }
         Ok(())
     }
+
+    /// Children to change, copied first if another document still shares them.
+    fn children_mut(
+        &mut self,
+        budget: &mut Budget,
+    ) -> Result<&mut BTreeMap<String, Arc<Node>>, PackageError> {
+        if Arc::strong_count(&self.children) > 1 {
+            let entries = self.children.keys();
+            let copied: u64 = entries.map(|name| name.len() as u64 + ENTRY_BYTES).sum();
+            budget.charge(MAP_BYTES + LEAF_BYTES + copied)?;
+        }
+        Ok(Arc::make_mut(&mut self.children))
+    }
+
+    fn changed_by(&mut self, save: ContentId) {
+        self.package = save;
+        self.own = false;
+    }
+}
+
+impl Drop for Dir {
+    /// Only the path rule bounds nesting, so release subtrees with a loop:
+    /// the default drop would recurse once per level.
+    fn drop(&mut self) {
+        let mut pending = Vec::new();
+        release(&mut self.children, &mut pending);
+        while let Some(node) = pending.pop() {
+            if let Ok(Node::Dir(mut dir)) = Arc::try_unwrap(node) {
+                release(&mut dir.children, &mut pending);
+            }
+        }
+    }
+}
+
+/// Move out the children this directory alone owns; shared ones stay put.
+fn release(children: &mut Arc<BTreeMap<String, Arc<Node>>>, pending: &mut Vec<Arc<Node>>) {
+    if let Some(children) = Arc::get_mut(children) {
+        pending.extend(std::mem::take(children).into_values());
+    }
+}
+
+/// A directory to change in place. A shared node is copied first, which is
+/// cheap because its children stay shared until they change too.
+fn directory<'a>(
+    node: &'a mut Arc<Node>,
+    budget: &mut Budget,
+) -> Result<&'a mut Dir, PackageError> {
+    if Arc::strong_count(node) > 1 {
+        budget.charge(NODE_BYTES)?;
+    }
+    match Arc::make_mut(node) {
+        Node::Dir(dir) => Ok(dir),
+        Node::Leaf(..) => unreachable!("changes only descend through directories"),
+    }
+}
+
+/// Bytes evaluation has used: documents read, then whatever saves allocate.
+struct Budget {
+    spent: u64,
+    limit: u64,
+}
+
+impl Budget {
+    fn charge(&mut self, bytes: u64) -> Result<(), PackageError> {
+        self.spent = self.spent.saturating_add(bytes);
+        if self.spent > self.limit {
+            return Err(PackageError::Limit("evaluation bytes"));
+        }
+        Ok(())
+    }
+}
+
+/// Evaluated views awaiting their users. A view moves to its last user, so a
+/// base that only one save uses changes in place instead of being copied.
+struct Views {
+    built: HashMap<Key, Arc<Node>>,
+    uses: HashMap<Key, usize>,
+}
+
+impl Views {
+    fn take(&mut self, id: ContentId) -> Arc<Node> {
+        let key = key(id);
+        let uses = self.uses.get_mut(&key).expect("counted reference");
+        *uses -= 1;
+        if *uses == 0 {
+            self.built.remove(&key).expect("evaluated before its users")
+        } else {
+            Arc::clone(&self.built[&key])
+        }
+    }
+}
+
+/// A view within the output bounds, whose every path is still a valid change path.
+fn check(node: &Node, limits: PackageLimits) -> Result<(), PackageError> {
+    if node.len() > limits.max_entries {
+        return Err(PackageError::Limit("visible entries"));
+    }
+    if node.bytes() > limits.max_view_bytes {
+        return Err(PackageError::Limit("view bytes"));
+    }
+    if matches!(node, Node::Dir(dir) if dir.depth > MAX_PATH) {
+        return Err(PackageError::Invalid(format!(
+            "resolved paths exceed {MAX_PATH} bytes"
+        )));
+    }
+    Ok(())
 }
 
 fn resolve_loaded(
@@ -541,180 +856,152 @@ fn resolve_loaded(
     loaded: Loaded,
     limits: PackageLimits,
 ) -> Result<ResolvedPackage, PackageError> {
-    let mut trees = BTreeMap::<Key, Tree>::new();
-    let mut budget = ExpansionBudget {
-        limits,
-        entries: 0,
-        bytes: loaded.order.iter().map(|id| id.size()).sum(),
+    let mut budget = Budget {
+        spent: loaded.order.iter().map(|id| id.size()).sum(),
+        limit: limits.max_evaluation_bytes,
     };
+    let mut views = Views {
+        built: HashMap::new(),
+        uses: HashMap::new(),
+    };
+    for document in loaded.documents.values() {
+        for child in references(document) {
+            *views.uses.entry(key(child)).or_default() += 1;
+        }
+    }
     for id in &loaded.order {
-        let mut tree = match &loaded.documents[&key(*id)] {
+        let node = match &loaded.documents[&key(*id)] {
             PackageDocument::File {
                 content,
                 executable,
-            } => singleton(
+            } => Arc::new(Node::Leaf(
                 *id,
                 ResolvedEntryKind::File {
                     content: *content,
                     executable: *executable,
                 },
-                &mut budget,
-            )?,
-            PackageDocument::Symlink { target } => singleton(
+            )),
+            PackageDocument::Symlink { target } => Arc::new(Node::Leaf(
                 *id,
                 ResolvedEntryKind::Symlink {
                     target: target.clone(),
                 },
-                &mut budget,
-            )?,
+            )),
             PackageDocument::Collection { entries } => {
-                let mut tree = singleton(*id, ResolvedEntryKind::Directory, &mut budget)?;
-                for (name, child) in entries {
-                    insert_tree(&mut tree, name, &trees[&key(*child)], &mut budget)?;
-                }
-                tree
+                let children = entries
+                    .iter()
+                    .map(|(name, child)| (name.clone(), views.take(*child)))
+                    .collect();
+                Arc::new(Node::Dir(Dir::new(*id, true, children)))
             }
             PackageDocument::Changes { base, changes } => {
-                let base = &trees[&key(*base)];
-                if !matches!(base.get(""), Some((_, ResolvedEntryKind::Directory))) {
+                let mut tree = views.take(*base);
+                if !matches!(*tree, Node::Dir(_)) {
                     return Err(PackageError::Invalid(
                         "changes require a directory-like base".into(),
                     ));
                 }
-                for (path, (_, kind)) in base {
-                    budget.entry(path.len(), kind)?;
-                }
-                let mut tree = base.clone();
                 for (path, replacement) in changes {
-                    let changed = remove_tree(&mut tree, path) || replacement.is_some();
-                    update_parents(
-                        &mut tree,
-                        path,
-                        *id,
-                        replacement.is_some(),
-                        changed,
-                        &mut budget,
-                    )?;
-                    if let Some(replacement) = replacement {
-                        insert_tree(&mut tree, path, &trees[&key(*replacement)], &mut budget)?;
-                    }
+                    let replacement = replacement.map(|child| views.take(child));
+                    tree = apply(tree, path, replacement, *id, &mut budget)?;
+                    check(&tree, limits)?;
                 }
+                let top = directory(&mut tree, &mut budget)?;
+                top.package = *id;
+                top.own = true;
                 tree
             }
         };
-        if tree.len() > limits.max_entries {
-            return Err(PackageError::Limit("visible entries"));
-        }
-        tree.get_mut("").expect("resolved root").0 = *id;
-        trees.insert(key(*id), tree);
+        check(&node, limits)?;
+        views.built.insert(key(*id), node);
     }
     Ok(ResolvedPackage {
         root,
-        entries: trees
-            .remove(&key(root))
-            .expect("loaded root")
-            .into_iter()
-            .map(|(path, (package, kind))| ResolvedEntry {
-                path,
-                package,
-                kind,
-            })
-            .collect(),
+        tree: views.built.remove(&key(root)).expect("loaded root"),
         dependencies: loaded.dependencies,
     })
 }
 
-fn singleton(
-    package: ContentId,
-    kind: ResolvedEntryKind,
-    budget: &mut ExpansionBudget,
-) -> Result<Tree, PackageError> {
-    budget.entry(0, &kind)?;
-    Ok(BTreeMap::from([(String::new(), (package, kind))]))
-}
-
-fn insert_tree(
-    tree: &mut Tree,
-    prefix: &str,
-    child: &Tree,
-    budget: &mut ExpansionBudget,
-) -> Result<(), PackageError> {
-    if tree
-        .len()
-        .checked_add(child.len())
-        .is_none_or(|count| count > budget.limits.max_entries)
-    {
-        return Err(PackageError::Limit("visible entries"));
-    }
-    for (path, (package, kind)) in child {
-        let length = prefix.len() + path.len() + usize::from(!path.is_empty());
-        budget.entry(length, kind)?;
-        let path = if path.is_empty() {
-            prefix.to_owned()
-        } else {
-            format!("{prefix}/{path}")
-        };
-        validate_package_path(&path)?;
-        tree.insert(path, (*package, kind.clone()));
-    }
-    Ok(())
-}
-
-/// Touch only the affected subtree, instead of scanning every entry for each edit.
-pub(crate) fn remove_tree<T>(tree: &mut BTreeMap<String, T>, path: &str) -> bool {
-    let descendants = descendants(tree, path)
-        .map(|(name, _)| name.clone())
-        .collect::<Vec<_>>();
-    let changed = tree.remove(path).is_some() || !descendants.is_empty();
-    for child in descendants {
-        tree.remove(&child);
-    }
-    changed
-}
-
-/// Canonical descendants in path order, excluding the named root itself.
-pub fn descendants<'a, T>(
-    tree: &'a BTreeMap<String, T>,
-    root: &str,
-) -> std::collections::btree_map::Range<'a, String, T> {
-    use std::ops::Bound::{Excluded, Included, Unbounded};
-    // '/' is immediately before '0', so the upper bound excludes every neighbor.
-    tree.range(if root.is_empty() {
-        (Excluded(String::new()), Unbounded)
-    } else {
-        (Included(format!("{root}/")), Excluded(format!("{root}0")))
-    })
-}
-
-fn update_parents(
-    tree: &mut Tree,
+/// Replace or delete `path`, changing only the directories on its way. As
+/// before, every directory on a changed path then identifies `save`, and
+/// missing ones are created only to hold a replacement.
+fn apply(
+    tree: Arc<Node>,
     path: &str,
-    package: ContentId,
-    create: bool,
-    changed: bool,
-    budget: &mut ExpansionBudget,
-) -> Result<(), PackageError> {
-    let mut child = path;
-    while let Some((parent, _)) = child.rsplit_once('/') {
-        match tree.get_mut(parent) {
-            Some((_, kind)) if *kind != ResolvedEntryKind::Directory => {
-                return Err(PackageError::Invalid(format!(
-                    "change path traverses a non-directory at {parent:?}"
-                )));
-            }
-            Some((id, _)) if changed => *id = package,
-            None if create => {
-                if tree.len() >= budget.limits.max_entries {
-                    return Err(PackageError::Limit("visible entries"));
-                }
-                budget.entry(parent.len(), &ResolvedEntryKind::Directory)?;
-                tree.insert(parent.to_owned(), (package, ResolvedEntryKind::Directory));
-            }
-            _ => {}
-        }
-        child = parent;
+    replacement: Option<Arc<Node>>,
+    save: ContentId,
+    budget: &mut Budget,
+) -> Result<Arc<Node>, PackageError> {
+    if !changes_anything(&tree, path, replacement.is_some())? {
+        return Ok(tree);
     }
-    Ok(())
+    let (parents, name) = path.rsplit_once('/').unwrap_or(("", path));
+    // Take each directory out of its parent, so a sole owner changes in place,
+    // remembering the longest path it held there.
+    let mut trail = Vec::new();
+    let mut folder = tree;
+    for part in parents.split('/').filter(|part| !part.is_empty()) {
+        let dir = directory(&mut folder, budget)?;
+        let (child, old) = if let Some(child) = dir.children_mut(budget)?.remove(part) {
+            dir.subtract(part, &child);
+            let old = child.span(part);
+            (child, Some(old))
+        } else {
+            budget.charge(NODE_BYTES + MAP_BYTES + LEAF_BYTES + part.len() as u64)?;
+            let created = Dir::new(save, false, BTreeMap::new());
+            (Arc::new(Node::Dir(created)), None)
+        };
+        trail.push((folder, part, old));
+        folder = child;
+    }
+    let dir = directory(&mut folder, budget)?;
+    let removed = dir.children_mut(budget)?.remove(name);
+    let old = removed.map(|node| {
+        dir.subtract(name, &node);
+        node.span(name)
+    });
+    let new = match replacement {
+        Some(node) => {
+            dir.add(name, &node);
+            let span = node.span(name);
+            dir.children_mut(budget)?.insert(name.to_owned(), node);
+            Some(span)
+        }
+        None => None,
+    };
+    dir.settle(old, new, budget)?;
+    dir.changed_by(save);
+    while let Some((mut parent, part, old)) = trail.pop() {
+        let dir = directory(&mut parent, budget)?;
+        dir.add(part, &folder);
+        let new = folder.span(part);
+        dir.children_mut(budget)?.insert(part.to_owned(), folder);
+        dir.settle(old, Some(new), budget)?;
+        dir.changed_by(save);
+        folder = parent;
+    }
+    Ok(folder)
+}
+
+/// Whether a change at `path` alters the tree. A path through a file is
+/// invalid, even for a deletion that would otherwise do nothing.
+fn changes_anything(tree: &Node, path: &str, inserting: bool) -> Result<bool, PackageError> {
+    let mut node = tree;
+    let mut start = 0_usize;
+    for part in path.split('/') {
+        let Node::Dir(dir) = node else {
+            return Err(PackageError::Invalid(format!(
+                "change path traverses a non-directory at {:?}",
+                &path[..start.saturating_sub(1)]
+            )));
+        };
+        let Some(child) = dir.children.get(part) else {
+            return Ok(inserting);
+        };
+        start += part.len() + 1;
+        node = child;
+    }
+    Ok(true)
 }
 
 fn unique_map<'de, D, T>(deserializer: D) -> Result<BTreeMap<String, T>, D::Error>
@@ -760,7 +1047,6 @@ mod tests {
         assert!(traversal.next().unwrap().is_some());
         traversal.insert(
             id,
-            0,
             PackageDocument::Changes {
                 base: id,
                 changes: BTreeMap::new(),
