@@ -59,6 +59,7 @@ use ontography_calculus::{
     TransferError,
 };
 use ontography_content::content::{ContentError, ContentId, ContentReader, ContentStore};
+use ontography_content::package::PackageLimits;
 
 type Text = Arc<str>;
 
@@ -517,6 +518,8 @@ impl SubmissionCustody {
 
 struct SessionCore {
     policy: Arc<dyn EditPolicy>,
+    /// Bounds on resolving content packages, fixed when the session opened.
+    package_limits: PackageLimits,
     inner: AsyncMutex<SessionState>,
     status: watch::Sender<SessionStatus>,
     frontier: watch::Sender<u64>,
@@ -1349,6 +1352,7 @@ impl SessionHandle {
 struct ProposalRuntimeControl {
     accepting: bool,
     sessions: BTreeMap<u64, Weak<SessionCore>>,
+    package_limits: PackageLimits,
 }
 
 struct ProposalRuntimeCore {
@@ -1463,9 +1467,21 @@ impl ProposalRuntime {
                 control: Mutex::new(ProposalRuntimeControl {
                     accepting: true,
                     sessions: BTreeMap::new(),
+                    package_limits: PackageLimits::default(),
                 }),
             }),
         }
+    }
+
+    /// Sets how much a content package may cost to resolve in sessions opened
+    /// after this call: documents and bytes read, and entries visible. The
+    /// right values depend on the host machine, so the host chooses them.
+    pub fn set_package_limits(&self, limits: PackageLimits) {
+        self.core
+            .control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .package_limits = limits;
     }
 
     /// Returns the initial graph and fixed schema/contract registry for new sessions.
@@ -1647,8 +1663,15 @@ impl ProposalRuntime {
         } = opened;
         let (status, _) = watch::channel(initial_status);
         let (frontier, _) = watch::channel(revision);
+        let package_limits = self
+            .core
+            .control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .package_limits;
         let session = Arc::new(SessionCore {
             policy: Arc::clone(&self.core.policy),
+            package_limits,
             inner: AsyncMutex::new(SessionState {
                 kernel: current_kernel,
                 status: initial_status,

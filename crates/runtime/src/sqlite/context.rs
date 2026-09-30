@@ -28,7 +28,7 @@ use ontography_calculus::Reject;
 
 /// Version of the context store: `context_meta`, `context_invocations`, and
 /// `context_events`, including their serialized invocation records.
-pub(crate) const CONTEXT_SCHEMA_VERSION: i64 = 2;
+pub(crate) const CONTEXT_SCHEMA_VERSION: i64 = 3;
 
 const SCHEMA: &str = "
 CREATE TABLE context_meta (
@@ -620,7 +620,7 @@ fn read_page(
             status: r.status,
             policy: data.policy,
             packages: data.packages,
-            members: data.members,
+            views: data.views,
             activation_id: r.activation.map(|a| format!("{:032x}", a.as_u128())),
             detail: r.detail,
             returned_bytes: r.returned_bytes,

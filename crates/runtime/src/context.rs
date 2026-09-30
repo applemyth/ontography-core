@@ -5,8 +5,10 @@
 
 use ontography_calculus::{ActivationId, Authority, ContentDigest, PackageId, Payload};
 use ontography_content::ContentId;
+use ontography_content::package::{ResolvedEntry, ResolvedPackage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
@@ -118,18 +120,14 @@ pub struct PackageGrant {
     pub parents: Vec<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
-/// A capability for one member of a frozen, resolved package view.
-pub struct PackageMemberGrant {
-    /// Opaque invocation-local handle. Directory handles bind to this exact view and path.
-    pub handle: String,
-    /// Root capability owning this resolved view.
+/// A resolved package view granted to an invocation. Its members are answered
+/// from the view itself and addressed as `<owner>/<path>`, so none are stored;
+/// the root member's handle is `owner`.
+pub struct ViewGrant {
+    /// Root capability owning this view.
     pub owner: String,
-    /// Canonical path inside the view; the root uses the empty path.
-    pub path: String,
-    /// Content identity for trusted host inspection, never a worker-selected lookup key.
-    pub package: ContentId,
-    /// Current filesystem interpretation, including the exact visible file commitment.
-    pub kind: ontography_content::package::ResolvedEntryKind,
+    /// Content package whose current view is granted.
+    pub root: ContentId,
 }
 
 #[derive(Clone, Debug)]
@@ -210,8 +208,8 @@ pub struct InvocationRecord {
     pub policy: ContextPolicy,
     /// Package capabilities issued to this invocation.
     pub packages: Vec<PackageGrant>,
-    /// Capabilities for members visible in the resolved delivered package views.
-    pub members: Vec<PackageMemberGrant>,
+    /// Resolved package views granted to this invocation.
+    pub views: Vec<ViewGrant>,
     /// Accepted activation identity, encoded as hexadecimal when committed.
     pub activation_id: Option<String>,
     /// Reason for rejection, interruption, or failure.
@@ -263,6 +261,8 @@ pub(crate) struct InvocationLease {
     pub session: crate::session::InvocationSession,
     pub data: Arc<InvocationData>,
     pub custody: Option<Arc<crate::session::SubmissionCustody>>,
+    /// Each granted view, evaluated once when the invocation began.
+    pub views: BTreeMap<String, ResolvedPackage>,
 }
 impl fmt::Debug for InvocationHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -328,16 +328,42 @@ impl InvocationHandle {
             input: digest,
             ..
         } = &self.inner.data.trigger
-            && self.inner.data.root_member(handle).is_none()
+            && !self.inner.views.contains_key(handle)
         {
             packages.push(root_input_descriptor(handle, *digest));
         }
-        serde_json::json!({"packages":packages,"members":self.inner.data.members.iter().map(member_descriptor).collect::<Vec<_>>()})
+        // Each view is described by its root; members are listed on request.
+        let views = self.inner.data.views.iter().filter_map(|grant| {
+            let view = self.inner.views.get(&grant.owner)?;
+            let mut root = member_descriptor(&grant.owner, &view.root_entry());
+            root["entries"] = serde_json::json!(view.entry_count());
+            Some(root)
+        });
+        serde_json::json!({"packages":packages,"views":views.collect::<Vec<_>>()})
     }
-    /// Returns the trusted catalog of resolved-view members without exposing a raw store.
+    /// Returns the resolved package views granted to this invocation.
     #[must_use]
-    pub fn members(&self) -> &[PackageMemberGrant] {
-        &self.inner.data.members
+    pub fn views(&self) -> &[ViewGrant] {
+        &self.inner.data.views
+    }
+    /// Looks up a member handle for trusted host inspection, including the
+    /// package identity that workers never see.
+    #[must_use]
+    pub fn member(&self, handle: &str) -> Option<ResolvedEntry> {
+        self.find_member(handle).map(|(_, _, entry)| entry)
+    }
+    /// The owner and view a member handle belongs to, and the member itself.
+    pub(crate) fn find_member(
+        &self,
+        handle: &str,
+    ) -> Option<(&str, &ResolvedPackage, ResolvedEntry)> {
+        let (owner, path) = match handle.split_once('/') {
+            Some((_, "")) => return None,
+            Some(parts) => parts,
+            None => (handle, ""),
+        };
+        let (owner, view) = self.inner.views.get_key_value(owner)?;
+        Some((owner, view, view.entry(path)?))
     }
 }
 
@@ -365,15 +391,8 @@ pub(crate) struct InvocationData {
     pub policy: ContextPolicy,
     /// Package capabilities issued to this invocation.
     pub packages: Vec<PackageGrant>,
-    /// Capabilities for members visible in the resolved delivered package views.
-    pub members: Vec<PackageMemberGrant>,
-}
-impl InvocationData {
-    pub fn root_member(&self, handle: &str) -> Option<&PackageMemberGrant> {
-        self.members
-            .iter()
-            .find(|member| member.handle == handle && member.path.is_empty())
-    }
+    /// Resolved package views granted to this invocation.
+    pub views: Vec<ViewGrant>,
 }
 pub(crate) fn package_key(id: PackageId) -> String {
     format!("{:032x}:{:032x}", id.producer().as_u128(), id.output())
@@ -449,11 +468,19 @@ pub(crate) fn package_descriptor(package: &PackageGrant, policy: &ContextPolicy)
     value
 }
 
-pub(crate) fn member_descriptor(member: &PackageMemberGrant) -> Value {
+/// The handle of a view member: its owner for the root, else `<owner>/<path>`.
+pub(crate) fn member_handle(owner: &str, path: &str) -> String {
+    if path.is_empty() {
+        owner.to_owned()
+    } else {
+        format!("{owner}/{path}")
+    }
+}
+pub(crate) fn member_descriptor(owner: &str, entry: &ResolvedEntry) -> Value {
     use ontography_content::package::ResolvedEntryKind;
-    let mut value =
-        serde_json::json!({"handle":member.handle,"owner":member.owner,"path":member.path});
-    match &member.kind {
+    let handle = member_handle(owner, &entry.path);
+    let mut value = serde_json::json!({"handle":handle,"owner":owner,"path":entry.path});
+    match &entry.kind {
         ResolvedEntryKind::Directory => {
             value["kind"] = Value::String("collection".into());
         }

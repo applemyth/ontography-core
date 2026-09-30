@@ -18,10 +18,12 @@ use crate::context::{
 use crate::context::{
     ContextContribution, ContextError, ContextEvent, ContextMode, ContextPolicy, ContextResponse,
     InitialContext, InvocationHandle, InvocationId, InvocationRecord, InvocationStatus,
-    InvocationTrigger, PackageGrant, PackageMemberGrant, ReceiptState,
+    InvocationTrigger, PackageGrant, ReceiptState, ViewGrant,
 };
 use ontography_calculus::{Emission, OutputAuthority, PackageId};
-use ontography_content::package::{PackageEnvelope, PackageStore, ResolvedEntryKind};
+use ontography_content::package::{
+    PackageEnvelope, PackageStore, ResolvedEntryKind, ResolvedPackage,
+};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
@@ -312,9 +314,10 @@ impl SessionHandle {
             ));
         }
         let content_store = inner.objects.content_store();
-        let package_store = PackageStore::new(content_store.clone());
+        let package_store =
+            PackageStore::new(content_store.clone()).with_limits(self.core.package_limits);
         let mut packages = Vec::new();
-        let mut members = Vec::new();
+        let mut views = GrantedViews::default();
         let mut sources = Vec::new();
         // The root input stays in memory until the invocation row is written;
         // publishing it earlier would leave an unreferenced blob behind every
@@ -489,7 +492,7 @@ impl SessionHandle {
                 &payload,
                 source,
                 &declared,
-                &mut members,
+                &mut views,
                 policy.max_members,
             )
             .await?;
@@ -533,7 +536,7 @@ impl SessionHandle {
             trigger: bound,
             policy,
             packages,
-            members,
+            views: views.grants,
         };
         // The root input, the dependency retention, and the invocation row are
         // written together under the lock with no await between them; a
@@ -553,6 +556,7 @@ impl SessionHandle {
                 session: self.invocation_session(),
                 data: Arc::new(data),
                 custody,
+                views: views.resolved,
             }),
         })
     }
@@ -633,29 +637,38 @@ struct ViewSource {
     owner: String,
     producer: Option<ontography_calculus::ActivationId>,
 }
+/// Views granted as an invocation begins: one grant per composed payload,
+/// each package evaluated once even when several sources name it.
+#[derive(Default)]
+struct GrantedViews {
+    grants: Vec<ViewGrant>,
+    resolved: BTreeMap<String, ResolvedPackage>,
+    entries: usize,
+}
 async fn register_composition(
     store: &PackageStore,
     payload: &Payload,
     source: ViewSource,
     declared: &[ContentId],
-    members: &mut Vec<PackageMemberGrant>,
+    views: &mut GrantedViews,
     max_members: usize,
 ) -> Result<(), ContextError> {
     let Some(envelope) = PackageEnvelope::from_payload(payload).map_err(storage)? else {
         return Ok(());
     };
+    let root = envelope.ontography_package;
     let declared = dependency_keys(declared);
-    if !declared.contains(&dependency_key(envelope.ontography_package)) {
+    if !declared.contains(&dependency_key(root)) {
         return Err(ContextError::Denied(
             "composed package was not declared by its producer".into(),
         ));
     }
-    let view = store
-        .resolve(envelope.ontography_package)
-        .await
-        .map_err(storage)?;
-    let closure = view.dependencies();
-    if closure
+    let view = match views.resolved.values().find(|view| view.root() == root) {
+        Some(view) => view.clone(),
+        None => store.resolve(root).await.map_err(storage)?,
+    };
+    if view
+        .dependencies()
         .iter()
         .any(|id| !declared.contains(&dependency_key(*id)))
     {
@@ -663,37 +676,22 @@ async fn register_composition(
             "package dependency was not declared by its producer".into(),
         ));
     }
-    if members.len().saturating_add(view.entries().len()) > max_members {
+    views.entries = views.entries.saturating_add(view.entry_count());
+    if views.entries > max_members {
         return Err(ContextError::Budget("package members".into()));
     }
-    for entry in view.entries() {
-        members.push(PackageMemberGrant {
-            handle: if entry.path.is_empty() {
-                source.owner.clone()
-            } else {
-                opaque()
-            },
-            owner: source.owner.clone(),
-            path: entry.path.clone(),
-            package: entry.package,
-            kind: entry.kind.clone(),
-        });
-    }
+    views.grants.push(ViewGrant {
+        owner: source.owner.clone(),
+        root,
+    });
+    views.resolved.insert(source.owner, view);
     Ok(())
 }
-fn immediate_child(parent: &str, path: &str) -> bool {
-    if path.is_empty() {
-        return false;
-    }
-    path.rsplit_once('/')
-        .map_or(parent.is_empty(), |(prefix, _)| prefix == parent)
-}
-fn resolved_descriptor(data: &InvocationData, owner: &str) -> Value {
-    let entries = data
-        .members
+fn resolved_descriptor(owner: &str, view: &ResolvedPackage) -> Value {
+    let entries = view
+        .entries()
         .iter()
-        .filter(|member| member.owner == owner)
-        .map(member_descriptor)
+        .map(|entry| member_descriptor(owner, entry))
         .collect::<Vec<_>>();
     json!({"root":owner,"view":entries})
 }
@@ -809,8 +807,8 @@ impl InvocationHandle {
         let mut contributions = Vec::new();
         let mut total = 0u64;
         for (package_id, source_digest, owner) in sources {
-            let content = if let Some(root) = self.inner.data.root_member(owner) {
-                match &root.kind {
+            let content = if let Some(view) = self.inner.views.get(owner) {
+                match &view.root_entry().kind {
                     ResolvedEntryKind::File { content, .. } => {
                         total = total.saturating_add(content.size());
                         budget(&stored, self.policy(), total)?;
@@ -823,7 +821,13 @@ impl InvocationHandle {
                         )
                     }
                     ResolvedEntryKind::Directory | ResolvedEntryKind::Symlink { .. } => {
-                        let value = resolved_descriptor(&self.inner.data, owner);
+                        // Refuse before writing out a view its paths alone would overflow.
+                        budget(
+                            &stored,
+                            self.policy(),
+                            total.saturating_add(view.view_bytes()),
+                        )?;
+                        let value = resolved_descriptor(owner, view);
                         let bytes = json_payload(&value)?;
                         total = total.saturating_add(bytes.len() as u64);
                         budget(&stored, self.policy(), total)?;
@@ -884,9 +888,12 @@ impl InvocationHandle {
     }
     /// Checks a worker-produced delivery and returns its required retention closure.
     ///
-    /// Ordinary bytes need no dependencies. Package envelopes may name only a
-    /// package in this invocation's resolved view; retained historical bases do
-    /// not authorize republication. Host-created outputs use `submit` directly.
+    /// Ordinary bytes need no dependencies. A package envelope may name only a
+    /// package whose own view is exactly a subtree of a granted view. Retained
+    /// historical bases do not authorize republication, and neither does a
+    /// directory a save changed: it carries the save's ID, whose own view
+    /// would expose files the granted view hides. Host-created outputs use
+    /// `submit` directly.
     ///
     /// # Errors
     /// Rejects malformed envelopes, ungranted package identities, expired custody,
@@ -902,23 +909,18 @@ impl InvocationHandle {
             let Some(envelope) = PackageEnvelope::from_payload(payload).map_err(storage)? else {
                 return Ok(Vec::new());
             };
-            if !self
-                .members()
-                .iter()
-                .any(|m| m.package == envelope.ontography_package)
-            {
+            let id = envelope.ontography_package;
+            if !self.inner.views.values().any(|view| view.publishes(id)) {
                 return Err(ContextError::Denied(
                     "worker output is outside the granted package view".into(),
                 ));
             }
-            let store = PackageStore::new(inner.objects.content_store());
+            let store = PackageStore::new(inner.objects.content_store())
+                .with_limits(session.core.package_limits);
             drop(inner);
-            let view = store
-                .resolve(envelope.ontography_package)
-                .await
-                .map_err(storage)?;
+            let dependencies = store.dependencies(id).await.map_err(storage)?;
             active(&*session.core.inner.lock().await, self)?;
-            Ok(view.dependencies())
+            Ok(dependencies)
         }
         .await;
         if let Err(error) = &validation {
@@ -1014,7 +1016,8 @@ impl InvocationHandle {
                 }
             }
         };
-        let store = PackageStore::new(inner.objects.content_store());
+        let store = PackageStore::new(inner.objects.content_store())
+            .with_limits(session.core.package_limits);
         drop(inner);
         let declared = dependency_keys(&contents);
         for envelope in envelopes {
@@ -1113,14 +1116,10 @@ impl InvocationHandle {
             let key = args.get("handle").and_then(Value::as_str);
             match operation {
                 "package.describe" => {
-                    let value = if let Some(member) = self
-                        .inner
-                        .data
-                        .members
-                        .iter()
-                        .find(|m| Some(m.handle.as_str()) == key)
+                    let value = if let Some((owner, _, member)) =
+                        key.and_then(|key| self.find_member(key))
                     {
-                        member_descriptor(member)
+                        member_descriptor(owner, &member)
                     } else if let BoundTrigger::Root {
                         handle: root,
                         input,
@@ -1177,28 +1176,17 @@ impl InvocationHandle {
                     )
                 }
                 "package.list" => {
-                    let member = self
-                        .inner
-                        .data
-                        .members
-                        .iter()
-                        .find(|m| Some(m.handle.as_str()) == key)
+                    let (owner, view, member) = key
+                        .and_then(|key| self.find_member(key))
                         .ok_or(ContextError::NotFound)?;
-                    if !matches!(member.kind, ResolvedEntryKind::Directory) {
+                    let Some(children) = view.children(&member.path) else {
                         return Err(ContextError::Denied("only a collection has members".into()));
-                    }
-                    let children = self
-                        .inner
-                        .data
-                        .members
+                    };
+                    let children = children
                         .iter()
-                        .filter(|candidate| {
-                            candidate.owner == member.owner
-                                && immediate_child(&member.path, &candidate.path)
-                        })
-                        .map(member_descriptor)
+                        .map(|child| member_descriptor(owner, child))
                         .collect::<Vec<_>>();
-                    let value = json!({"handle":member.handle,"members":children});
+                    let value = json!({"handle":key,"members":children});
                     retain_event(
                         &session.core,
                         &mut inner,
@@ -1209,12 +1197,8 @@ impl InvocationHandle {
                     )
                 }
                 "package.read" => {
-                    let (digest, content, size) = if let Some(member) = self
-                        .inner
-                        .data
-                        .members
-                        .iter()
-                        .find(|m| Some(m.handle.as_str()) == key)
+                    let (digest, content, size) = if let Some((_, _, member)) =
+                        key.and_then(|key| self.find_member(key))
                     {
                         let ResolvedEntryKind::File { content, .. } = member.kind else {
                             return Err(ContextError::Denied("package.read requires a file; use package.list or package.describe for other members".into()));

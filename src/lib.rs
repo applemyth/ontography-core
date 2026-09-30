@@ -42,7 +42,7 @@ pub use content::{ContentError, ContentId, ContentMetadata, ContentReader, Conte
 pub use context::{
     ContextContribution, ContextError, ContextEvent, ContextMode, ContextPolicy, ContextResponse,
     InitialContext, InvocationHandle, InvocationId, InvocationRecord, InvocationStatus,
-    InvocationTrigger, PackageGrant, PackageMemberGrant, ReceiptState,
+    InvocationTrigger, PackageGrant, ReceiptState, ViewGrant,
 };
 pub use ontography_application::{ApplicationConfig, ApplicationConfigError, ApplicationRegistry};
 pub use ontography_calculus::{
