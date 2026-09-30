@@ -508,6 +508,24 @@ async fn worker_output_may_republish_only_packages_in_the_granted_view() {
 }
 
 #[tokio::test]
+async fn malformed_worker_output_is_denied_not_a_storage_failure() {
+    let fixture = Fixture::new().await;
+    let root = fixture.tree().await;
+    let invocation = fixture.invoke(root, ContextPolicy::default()).await;
+    // A retry cannot cure the worker's own output, so it is refused as
+    // `submit` refuses it; `Storage` stays for faults a retry may cure.
+    let malformed: Payload = Arc::from(br#"{"ontography_package":7}"#.as_slice());
+    assert!(matches!(
+        invocation.validate_worker_output(&malformed).await,
+        Err(ContextError::Denied(_))
+    ));
+    invocation
+        .validate_worker_output(&envelope(root))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn republishing_a_save_labelled_folder_must_not_expose_hidden_files() {
     let fixture = Fixture::new().await;
     // B0 = { c: { f }, d: { secret } }

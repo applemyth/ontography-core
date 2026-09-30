@@ -221,7 +221,8 @@ pub struct InvocationRecord {
 /// Failure to issue, use, record, or publish a scoped invocation.
 pub enum ContextError {
     #[error("context access denied: {0}")]
-    /// Policy or a handle disallows this operation.
+    /// Policy or a handle disallows this operation, or a worker's output is
+    /// a malformed package envelope.
     Denied(String),
     #[error("context budget exceeded: {0}")]
     /// A configured cumulative limit would be exceeded.

@@ -906,7 +906,10 @@ impl InvocationHandle {
         let validation = async {
             let inner = session.core.inner.lock().await;
             active(&inner, self)?;
-            let Some(envelope) = PackageEnvelope::from_payload(payload).map_err(storage)? else {
+            // The worker's own malformed output, refused as `submit` refuses it.
+            let Some(envelope) = PackageEnvelope::from_payload(payload)
+                .map_err(|error| ContextError::Denied(error.to_string()))?
+            else {
                 return Ok(Vec::new());
             };
             let id = envelope.ontography_package;
